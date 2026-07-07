@@ -1,0 +1,79 @@
+"""Stage 1 driver: optimize the airfoil schedule (thickness/camber/reflex
+scale at each control station), planform held fixed at the baseline.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from ..geometry.params import DesignParameters
+from ..geometry.airfoil_family import MIN_THICKNESS_RATIO, MAX_THICKNESS_RATIO, max_thickness_ratio
+from ..objective.metrics import evaluate_design
+from ..objective.objective import ObjectiveWeights, score
+from .base import EvaluatedCandidate, OptimizationResult
+from .vector import ParameterSet, Var
+from .hierarchical import HierarchicalGridSearch
+
+_BASE_MAX_THICKNESS_RATIO = max_thickness_ratio(1.0)
+THICKNESS_SCALE_BOUNDS = (MIN_THICKNESS_RATIO / _BASE_MAX_THICKNESS_RATIO, MAX_THICKNESS_RATIO / _BASE_MAX_THICKNESS_RATIO)
+CAMBER_SCALE_BOUNDS = (0.0, 1.6)
+REFLEX_SCALE_BOUNDS = (0.0, 1.6)
+
+
+def _stage1_build(x: np.ndarray, baseline: DesignParameters) -> DesignParameters:
+    n = len(baseline.airfoil_schedule.y_control)
+    thickness = tuple(x[0:n])
+    camber = tuple(x[n : 2 * n])
+    reflex = tuple(x[2 * n : 3 * n])
+    return baseline.with_airfoil_schedule(thickness_scale=thickness, camber_scale=camber, reflex_scale=reflex)
+
+
+def make_stage1_parameter_set(baseline: DesignParameters) -> ParameterSet:
+    n = len(baseline.airfoil_schedule.y_control)
+    variables = []
+    for i in range(n):
+        variables.append(Var(f"thickness_scale_{i}", *THICKNESS_SCALE_BOUNDS, default=baseline.airfoil_schedule.thickness_scale[i]))
+    for i in range(n):
+        variables.append(Var(f"camber_scale_{i}", *CAMBER_SCALE_BOUNDS, default=baseline.airfoil_schedule.camber_scale[i]))
+    for i in range(n):
+        variables.append(Var(f"reflex_scale_{i}", *REFLEX_SCALE_BOUNDS, default=baseline.airfoil_schedule.reflex_scale[i]))
+
+    return ParameterSet(variables=variables, build_fn=_stage1_build, baseline=baseline)
+
+
+@dataclass
+class Stage1Objective:
+    """vector -> EvaluatedCandidate. A real (picklable) class rather than a
+    closure, since ProcessPoolExecutor needs to pickle it under Windows'
+    spawn start method when n_jobs > 1."""
+
+    parameter_set: ParameterSet
+    weights: ObjectiveWeights
+
+    def __call__(self, x: np.ndarray) -> EvaluatedCandidate:
+        params = self.parameter_set.build(x)
+        metrics = evaluate_design(params)
+        result = score(metrics, self.weights)
+        return EvaluatedCandidate(
+            x=np.asarray(x, dtype=float), score=result.score, valid=metrics.valid,
+            extra={"contributions": result.contributions, "metrics": metrics},
+        )
+
+
+def run_stage1(
+    baseline: DesignParameters,
+    weights: ObjectiveWeights | None = None,
+    optimizer: HierarchicalGridSearch | None = None,
+) -> tuple[OptimizationResult, DesignParameters]:
+    """Optimize the airfoil schedule; returns the optimization result plus
+    the resulting full DesignParameters (planform unchanged from baseline)."""
+    weights = weights or ObjectiveWeights()
+    optimizer = optimizer or HierarchicalGridSearch()
+
+    parameter_set = make_stage1_parameter_set(baseline)
+    objective_fn = Stage1Objective(parameter_set, weights)
+
+    result = optimizer.optimize(objective_fn, parameter_set.bounds, x0=parameter_set.default_vector)
+    best_params = parameter_set.build(result.best_x)
+    return result, best_params

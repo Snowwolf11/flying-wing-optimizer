@@ -1,0 +1,15 @@
+w_cruise_L_over_D: 1.0
+w_fast_L_over_D: 0.4
+w_root_cl_max: 2.0
+w_mass: 3.0
+w_safety_factor: 0.05
+safety_factor_min: 1.5
+w_static_margin: 0.0
+static_margin_target:
+- 0.02
+- 0.15
+w_cm0: 5.0
+cm0_min: -0.02
+w_payload_volume: 1000.0
+invalid_penalty: 1000.0
+constraint_penalty_scale: 1000.0
