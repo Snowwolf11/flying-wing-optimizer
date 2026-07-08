@@ -1,4 +1,4 @@
-"""Interactive control-panel GUI: a thin Dash shell combining 4 tabs.
+"""Interactive control-panel GUI: a thin Dash shell combining 6 tabs.
 
 - Design: live single-design parameter editing (design_tab.py)
 - Bounds & Weights: edit objective weights + search bounds/structural
@@ -8,8 +8,12 @@
   (run_tab.py, run_manager.py)
 - Results: browse/load/plot past runs from outputs/ (results_tab.py,
   results_io.py)
+- Deep Analysis: a consolidated post-run report (score breakdown, mass/CG,
+  structural detail, Cp-based flow visualization) for one selected run
+  (analysis_tab.py)
+- Documentation: renders README.md in-app (docs_tab.py)
 
-All 4 tabs' layouts are built once, up front, and are simultaneously
+All 6 tabs' layouts are built once, up front, and are simultaneously
 present in the DOM (Dash's static `dcc.Tabs` pattern) -- this keeps every
 callback's target components available from the start, so cross-tab
 callbacks (e.g. Results' "send to Design tab", Run's "use Design tab
@@ -20,7 +24,7 @@ from __future__ import annotations
 import dash
 from dash import dcc, html
 
-from . import design_tab, config_tab, run_tab, results_tab
+from . import design_tab, config_tab, run_tab, results_tab, analysis_tab, docs_tab
 
 
 def build_layout() -> html.Div:
@@ -34,6 +38,8 @@ def build_layout() -> html.Div:
                     dcc.Tab(label="Bounds & Weights", value="config", children=config_tab.layout()),
                     dcc.Tab(label="Run Optimizer", value="run", children=run_tab.layout()),
                     dcc.Tab(label="Results", value="results", children=results_tab.layout()),
+                    dcc.Tab(label="Deep Analysis", value="analysis", children=analysis_tab.layout()),
+                    dcc.Tab(label="Documentation", value="docs", children=docs_tab.layout()),
                 ],
             ),
         ]
@@ -48,5 +54,7 @@ def create_app() -> dash.Dash:
     config_tab.register_callbacks(app)
     run_tab.register_callbacks(app)
     results_tab.register_callbacks(app)
+    analysis_tab.register_callbacks(app)
+    docs_tab.register_callbacks(app)
 
     return app

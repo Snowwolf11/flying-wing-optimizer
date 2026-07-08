@@ -215,8 +215,8 @@ def build_aircraft(params: DesignParameters) -> Aircraft:
     fuselage_fit = check_fuselage_fit(
         y_stations=y_stations,
         span_m=params.planform.span_m,
-        chord_m=station["chord_m"],
-        thickness_ratio=thickness_ratio,
+        upper_surface_m=upper_surface_m,
+        lower_surface_m=lower_surface_m,
     )
 
     return Aircraft(

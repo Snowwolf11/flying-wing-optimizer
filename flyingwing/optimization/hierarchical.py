@@ -18,11 +18,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor
+from typing import Callable
 
 import numpy as np
 from scipy.stats import qmc
 
 from .base import Optimizer, ObjectiveFn, EvaluatedCandidate, OptimizationResult
+
+ProgressCallback = Callable[[dict], None]
 
 
 @dataclass
@@ -36,21 +39,43 @@ class HierarchicalGridSearch(Optimizer):
 
     def optimize(
         self, objective_fn: ObjectiveFn, bounds: list[tuple[float, float]], x0: np.ndarray | None = None,
+        progress_cb: ProgressCallback | None = None,
     ) -> OptimizationResult:
         bounds_arr = np.array(bounds, dtype=float)
         lo, hi = bounds_arr[:, 0], bounds_arr[:, 1]
         n_dims = len(bounds)
+
+        # Rough estimate only (the exact per-stage count can drift slightly
+        # from integer division across retained elites) -- good enough for a
+        # progress bar, not used for anything else.
+        evals_total_estimate = self.n_samples_per_stage * self.n_stages + (1 if x0 is not None else 0)
+        evals_done = 0
 
         history: list[list[EvaluatedCandidate]] = []
 
         coarse_unit = qmc.LatinHypercube(d=n_dims, seed=self.seed).random(n=self.n_samples_per_stage)
         candidates = qmc.scale(coarse_unit, lo, hi)
         if x0 is not None:
-            candidates = np.vstack([np.asarray(x0, dtype=float)[None, :], candidates])
+            # Clip: x0 (typically a ParameterSet's baseline-derived default)
+            # can legitimately fall outside the current search bounds -- e.g.
+            # someone tightened a bound below the baseline design's actual
+            # value. Left unclipped, an out-of-bounds x0 that becomes an
+            # elite can collapse a later refinement stage's local bounds to
+            # zero width (clip(x0 +/- range/2, lo, hi) saturates both ends to
+            # the same edge), which crashes qmc.scale.
+            x0_clipped = np.clip(np.asarray(x0, dtype=float), lo, hi)
+            candidates = np.vstack([x0_clipped[None, :], candidates])
 
         evaluated = self._evaluate_batch(objective_fn, candidates)
         history.append(evaluated)
         retained = self._retain_best(evaluated)
+        evals_done += len(evaluated)
+        if progress_cb is not None:
+            progress_cb({
+                "stage": 1, "n_stages": self.n_stages,
+                "evals_done": evals_done, "evals_total": evals_total_estimate,
+                "best_score": retained[0].score,
+            })
 
         search_range = hi - lo
         for stage in range(1, self.n_stages):
@@ -68,6 +93,13 @@ class HierarchicalGridSearch(Optimizer):
             evaluated = self._evaluate_batch(objective_fn, stage_candidates)
             history.append(evaluated)
             retained = self._retain_best(retained + evaluated)  # never lose the best-so-far
+            evals_done += len(evaluated)
+            if progress_cb is not None:
+                progress_cb({
+                    "stage": stage + 1, "n_stages": self.n_stages,
+                    "evals_done": evals_done, "evals_total": evals_total_estimate,
+                    "best_score": retained[0].score,
+                })
 
         best = max(retained, key=lambda c: c.score)
         return OptimizationResult(best_candidate=best, history=history)

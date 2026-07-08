@@ -7,7 +7,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from ..analysis.structures import StructuralProxyResult
+from ..analysis.structures import StructuralProxyResult, TorsionDeflectionResult
 
 
 def plot_structures(result: StructuralProxyResult) -> go.Figure:
@@ -44,6 +44,37 @@ def plot_structures(result: StructuralProxyResult) -> go.Figure:
         title=f"Structural Proxy -- {result.load_factor_g:.1f}g maneuver (CL={result.cl_maneuver:.3f}), "
               f"min safety factor={result.min_safety_factor:.1f}",
         showlegend=False, height=650,
+    )
+    return fig
+
+
+def plot_torsion_and_deflection(result: TorsionDeflectionResult) -> go.Figure:
+    """Deep-analysis-only extras on top of plot_structures: torque, thin-
+    walled torsional shear stress + safety factor, and bending deflection."""
+    fig = make_subplots(
+        rows=1, cols=4,
+        subplot_titles=("Torque", "Torsional shear stress", "Torsion safety factor", "Bending deflection"),
+    )
+
+    fig.add_trace(go.Scatter(x=result.y_stations, y=result.torque_nm, mode="lines"), row=1, col=1)
+    fig.update_yaxes(title_text="torque (N*m)", row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=result.y_stations, y=result.shear_stress_pa / 1e6, mode="lines"), row=1, col=2)
+    fig.update_yaxes(title_text="shear stress (MPa)", row=1, col=2)
+
+    fig.add_trace(go.Scatter(x=result.y_stations, y=result.torsion_safety_factor, mode="lines"), row=1, col=3)
+    fig.update_yaxes(title_text="safety factor", type="log", row=1, col=3)
+
+    fig.add_trace(go.Scatter(x=result.y_stations, y=result.deflection_m * 1000, mode="lines"), row=1, col=4)
+    fig.update_yaxes(title_text="deflection (mm)", row=1, col=4)
+
+    for col in (1, 2, 3, 4):
+        fig.update_xaxes(title_text="y (normalized span)", row=1, col=col)
+
+    fig.update_layout(
+        title=f"Torsion & Deflection -- min torsion safety factor={result.min_torsion_safety_factor:.1f}, "
+              f"tip deflection={result.tip_deflection_m * 1000:.1f} mm",
+        showlegend=False, height=350,
     )
     return fig
 

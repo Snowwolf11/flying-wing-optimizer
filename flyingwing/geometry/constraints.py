@@ -16,7 +16,10 @@ import numpy as np
 
 from .aircraft import Aircraft
 from .airfoil_family import MIN_THICKNESS_RATIO
-from ..config import MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M, SPAR_DEPTH_FRACTION_THICKNESS
+from ..config import (
+    MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M, MAX_Z_CURVATURE_PER_M,
+    SPAR_DEPTH_FRACTION_THICKNESS,
+)
 
 
 @dataclass
@@ -76,9 +79,14 @@ def check_stage2_constraints(aircraft: Aircraft) -> ConstraintReport:
         violations.append("chord is zero or negative somewhere along the span (self-intersecting geometry)")
 
     le_curvature = curve_curvature(aircraft.x_le_m, aircraft.span_station_m)
-    max_curvature = float(np.max(le_curvature))
-    if max_curvature > MAX_LE_CURVATURE_PER_M:
-        violations.append(f"leading-edge curvature {max_curvature:.1f} /m exceeds maximum {MAX_LE_CURVATURE_PER_M:.1f} /m (not smoothly manufacturable)")
+    max_le_curvature = float(np.max(le_curvature))
+    if max_le_curvature > MAX_LE_CURVATURE_PER_M:
+        violations.append(f"leading-edge curvature {max_le_curvature:.1f} /m exceeds maximum {MAX_LE_CURVATURE_PER_M:.1f} /m (not smoothly manufacturable)")
+
+    z_curvature = curve_curvature(aircraft.z_le_m, aircraft.span_station_m)
+    max_z_curvature = float(np.max(z_curvature))
+    if max_z_curvature > MAX_Z_CURVATURE_PER_M:
+        violations.append(f"vertical (winglet) curvature {max_z_curvature:.1f} /m exceeds maximum {MAX_Z_CURVATURE_PER_M:.1f} /m (not smoothly manufacturable)")
 
     return ConstraintReport(valid=(len(violations) == 0), violations=violations)
 

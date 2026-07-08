@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
+import re
 import subprocess
 import sys
 import time
@@ -76,6 +78,25 @@ def read_log_tail(max_chars: int = 6000) -> str:
     if _current_run is None or not _current_run.log_path.exists():
         return ""
     return _current_run.log_path.read_text(errors="replace")[-max_chars:]
+
+
+_PROGRESS_LINE_RE = re.compile(r"^PROGRESS (\{.*\})$")
+
+
+def progress() -> dict | None:
+    """The most recent stage's progress info printed by the running script
+    (see scripts/run_*.py's `_print_progress`), or None if nothing's been
+    printed yet / no run is active."""
+    log = read_log_tail()
+    last: dict | None = None
+    for line in log.splitlines():
+        m = _PROGRESS_LINE_RE.match(line.strip())
+        if m:
+            try:
+                last = json.loads(m.group(1))
+            except json.JSONDecodeError:
+                continue
+    return last
 
 
 def status() -> str:

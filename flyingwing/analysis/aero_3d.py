@@ -36,6 +36,35 @@ N_VLM_STATIONS = 13
 VLM_SPANWISE_RESOLUTION = 5
 VLM_CHORDWISE_RESOLUTION = 6
 
+# Candidate finer resolutions to try for a deep-analysis-only cross-check
+# (never per optimizer candidate), each tried in order until one gives a
+# physically plausible result (see is_physically_plausible /
+# analyze_vlm_robust below). IMPORTANT finding: going finer is NOT reliably
+# safer here -- panel-method conditioning turned out to be sensitive to the
+# exact discretization in a way that doesn't scale predictably with station
+# count. Empirically, on one optimizer-produced (aggressive, high-alpha)
+# geometry: 13 stations gave a sane CL=0.23, but 17 stations blew up to
+# CL=-8.15 and 21 stations to CL=6.48 (real wings don't exceed CL~2) --
+# i.e. *finer than the original default was actively worse* for that
+# design, even though 21 stations tested fine on a different (more
+# conservative) geometry. There's no station count that's safe for every
+# geometry this project can produce, so this is a "try harder, but verify"
+# list rather than a single fixed "deep" resolution -- (13, 5, 6) (this
+# project's original, most-tested default) is always the last, safest
+# fallback.
+VLM_DEEP_CANDIDATE_RESOLUTIONS = [
+    (21, 8, 7),
+    (17, 6, 6),
+    (N_VLM_STATIONS, VLM_SPANWISE_RESOLUTION, VLM_CHORDWISE_RESOLUTION),
+]
+
+
+def is_physically_plausible(metrics: "AircraftAeroMetrics") -> bool:
+    """Coarse sanity check for VLM ill-conditioning blowup (see
+    VLM_DEEP_CANDIDATE_RESOLUTIONS' comment) -- real subsonic wings don't
+    exceed CL ~ 2 or CD ~ 1."""
+    return abs(metrics.CL) < 3.0 and 0.0 < metrics.CD < 1.0
+
 
 @dataclass
 class AircraftAeroMetrics:
@@ -53,7 +82,7 @@ class AircraftAeroMetrics:
     CLa_per_rad: float
     Cma_per_rad: float
     neutral_point_x_m: float
-    static_margin_vs_xyz_ref: float  # relative to the placeholder 25%-MAC xyz_ref; refine once mass is estimated
+    static_margin_vs_xyz_ref: float  # vs. the 25%-MAC xyz_ref (an aero-only reference point, not a real CG) -- a cheap AeroBuildup-vs-VLM cross-check value only; DesignMetrics.static_margin (objective/cg.py) uses a real CG estimate instead
 
     trim_alpha_deg: float
     trim_CL: float
@@ -182,6 +211,57 @@ def analyze_vlm(
         trim_L_over_D=trim_CL / trim_CD if trim_CD != 0 else float("nan"),
     )
     return metrics, res
+
+
+def analyze_vlm_robust(
+    aircraft: Aircraft, speed_ms: float, alpha_deg: float,
+    candidate_resolutions: list[tuple[int, int, int]] = VLM_DEEP_CANDIDATE_RESOLUTIONS,
+) -> tuple[AircraftAeroMetrics, dict] | None:
+    """Try each (n_vlm_stations, spanwise_resolution, chordwise_resolution)
+    candidate in order, returning the first physically plausible result.
+    Returns None if every candidate -- including the safest, most-tested
+    default -- fails, rather than ever returning a silently-wrong result
+    (see VLM_DEEP_CANDIDATE_RESOLUTIONS' comment for why "finer" isn't
+    reliably "safer" for this project's geometry)."""
+    for n, sr, cr in candidate_resolutions:
+        metrics, raw = analyze_vlm(aircraft, speed_ms, alpha_deg=alpha_deg, n_vlm_stations=n, spanwise_resolution=sr, chordwise_resolution=cr)
+        if is_physically_plausible(metrics):
+            return metrics, raw
+    return None
+
+
+@dataclass
+class HybridDragEstimate:
+    """VLM's induced drag (a more rigorous potential-flow solve than
+    AeroBuildup's simpler induced-drag model) combined with AeroBuildup's
+    profile drag (VLM itself is inviscid, so it reports zero profile drag)
+    at the same operating point -- each method's stronger half, deep-
+    analysis-only (not cheap enough for the optimizer loop)."""
+
+    speed_ms: float
+    alpha_deg: float
+    CL_vlm: float
+    CD_induced_vlm: float
+    CD_profile_aerobuildup: float
+    CD_total: float
+    L_over_D: float
+
+
+def analyze_hybrid_drag(aircraft: Aircraft, speed_ms: float, alpha_deg: float = 2.0) -> HybridDragEstimate | None:
+    """None if VLM couldn't produce a physically plausible result at any
+    candidate resolution for this geometry -- see analyze_vlm_robust."""
+    vlm_result = analyze_vlm_robust(aircraft, speed_ms, alpha_deg)
+    if vlm_result is None:
+        return None
+    vlm_metrics, _ = vlm_result
+    ab_metrics = analyze_aerobuildup(aircraft, speed_ms, alpha_deg=alpha_deg)
+
+    cd_total = vlm_metrics.CD_induced + ab_metrics.CD_profile
+    return HybridDragEstimate(
+        speed_ms=speed_ms, alpha_deg=alpha_deg, CL_vlm=vlm_metrics.CL,
+        CD_induced_vlm=vlm_metrics.CD_induced, CD_profile_aerobuildup=ab_metrics.CD_profile,
+        CD_total=cd_total, L_over_D=vlm_metrics.CL / cd_total if cd_total > 0 else float("nan"),
+    )
 
 
 def validate_with_avl(aircraft: Aircraft, speed_ms: float, alpha_deg: float = 2.0, avl_command: str = "avl") -> dict | None:

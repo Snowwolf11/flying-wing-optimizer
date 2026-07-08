@@ -16,15 +16,21 @@ from dash import dcc, html, Input, Output, State
 import plotly.graph_objects as go
 
 from ..geometry.aircraft import build_aircraft
+from ..geometry.mesh import build_watertight_mesh
+from ..geometry.export import write_stl
 from ..objective.metrics import evaluate_design
+from ..objective.performance import estimate_performance
 from ..viz.geometry_plots import plot_3d_aircraft, plot_orthographic_views, plot_airfoil_distribution
 from ..viz.optimization_plots import plot_convergence, plot_parameter_evolution, plot_multi_cycle_convergence
+from ..config import CRUISE_SPEED_MS, OUTPUT_DIR
 from . import results_io
+from .design_tab import build_planform_rows, build_airfoil_rows
 
 _METRIC_FIELDS = [
     "span_m", "aspect_ratio", "wing_area_m2",
     "cruise_L_over_D", "fast_L_over_D", "root_cl_max",
     "min_safety_factor", "total_structural_mass_kg", "payload_volume_margin_m3",
+    "static_margin",
 ]
 
 
@@ -38,6 +44,8 @@ def layout() -> html.Div:
                     html.Button("Refresh list", id="refresh-results-button", n_clicks=0, style={"marginLeft": "10px"}),
                     html.Button("Load", id="load-result-button", n_clicks=0, style={"marginLeft": "10px"}),
                     html.Button("Send to Design tab", id="send-to-design-button", n_clicks=0, style={"marginLeft": "10px"}),
+                    html.Button("Export STL", id="results-export-stl-button", n_clicks=0, style={"marginLeft": "10px"}),
+                    dcc.Download(id="results-download-stl"),
                 ],
                 style={"marginBottom": "10px"},
             ),
@@ -107,6 +115,19 @@ def register_callbacks(app: dash.Dash) -> None:
                 lines.append(f"{field:<28}{b:>14.4f}{o:>14.4f}")
             else:
                 lines.append(f"{field:<28}{o:>14.4f}")
+
+        perf = estimate_performance(aircraft, best_metrics.total_structural_mass_kg, CRUISE_SPEED_MS)
+        battery_range = (
+            f"{best_metrics.battery_x_min_m * 1000:.0f}-{best_metrics.battery_x_max_m * 1000:.0f} mm from root LE"
+            if best_metrics.battery_range_feasible else "none feasible within the airframe"
+        )
+        lines += [
+            "",
+            f"Battery x-range for target static margin: {battery_range}",
+            f"Best glide ratio: {perf.glide_ratio_max:.1f}  at alpha {perf.glide_alpha_deg:.1f} deg  "
+            f"(glide angle {perf.glide_angle_deg:.1f} deg, sink {perf.sink_rate_ms:.2f} m/s)",
+            f"Cruise power: {perf.cruise_power_w:.1f} W   Est. endurance: {perf.estimated_endurance_min:.0f} min   Est. range: {perf.estimated_range_km:.0f} km",
+        ]
         summary = "\n".join(lines)
 
         fig_3d = plot_3d_aircraft(aircraft)
@@ -123,13 +144,8 @@ def register_callbacks(app: dash.Dash) -> None:
     @app.callback(
         Output("span-input", "value"),
         Output("sweep-input", "value"),
-        Output({"type": "chord-input", "index": dash.ALL}, "value"),
-        Output({"type": "twist-input", "index": dash.ALL}, "value"),
-        Output({"type": "le-input", "index": dash.ALL}, "value"),
-        Output({"type": "z-input", "index": dash.ALL}, "value"),
-        Output({"type": "thickness-input", "index": dash.ALL}, "value"),
-        Output({"type": "camber-input", "index": dash.ALL}, "value"),
-        Output({"type": "reflex-input", "index": dash.ALL}, "value"),
+        Output("planform-rows-container", "children"),
+        Output("airfoil-rows-container", "children"),
         Input("send-to-design-button", "n_clicks"),
         State("results-loaded-store", "data"),
         prevent_initial_call=True,
@@ -140,8 +156,26 @@ def register_callbacks(app: dash.Dash) -> None:
         data = results_io.load_run(output_dir_name)
         params = results_io.run_best_params(data)
         p, a = params.planform, params.airfoil_schedule
+        # Rebuild the row containers (rather than targeting the existing
+        # ALL-pattern value props directly) since the loaded run's station
+        # count may differ from whatever's currently shown in the Design tab.
         return (
             p.span_m, p.sweep_deg,
-            list(p.chord_m), list(p.twist_deg), list(p.le_offset_deviation_m), list(p.z_offset_m),
-            list(a.thickness_scale), list(a.camber_scale), list(a.reflex_scale),
+            build_planform_rows(list(p.y_control), list(p.chord_m), list(p.twist_deg), list(p.le_offset_deviation_m), list(p.z_offset_m)),
+            build_airfoil_rows(list(a.y_control), list(a.thickness_scale), list(a.camber_scale), list(a.reflex_scale)),
         )
+
+    @app.callback(
+        Output("results-download-stl", "data"),
+        Input("results-export-stl-button", "n_clicks"),
+        State("results-loaded-store", "data"),
+        prevent_initial_call=True,
+    )
+    def export_stl(n_clicks, output_dir_name):
+        if not output_dir_name:
+            raise dash.exceptions.PreventUpdate
+        _, _, _, aircraft = results_io.load_run_aircraft(output_dir_name)
+        mesh = build_watertight_mesh(aircraft)
+        stl_path = OUTPUT_DIR / output_dir_name / "aircraft.stl"
+        write_stl(mesh, stl_path)
+        return dcc.send_file(str(stl_path))

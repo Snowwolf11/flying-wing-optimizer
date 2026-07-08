@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from ..geometry.params import DesignParameters
 from ..objective.objective import ObjectiveWeights
 from .base import OptimizationResult
-from .hierarchical import HierarchicalGridSearch
+from .hierarchical import HierarchicalGridSearch, ProgressCallback
 from .stage1 import run_stage1
 from .stage2 import run_stage2
 
@@ -49,6 +49,7 @@ def run_multi_cycle(
     stage2_optimizer: HierarchicalGridSearch | None = None,
     start_with: str = "stage1",
     convergence_tol: float | None = None,
+    progress_cb: ProgressCallback | None = None,
 ) -> MultiCycleResult:
     """Run `n_cycles` Stage1<->Stage2 cycles (2 stages per cycle). If
     `convergence_tol` is set, stop early once a full cycle's best score
@@ -66,10 +67,15 @@ def run_multi_cycle(
 
     for cycle in range(n_cycles):
         for stage_name in stage_order:
+            stage_progress_cb = None
+            if progress_cb is not None:
+                stage_progress_cb = lambda info, cycle=cycle, stage_name=stage_name: progress_cb(
+                    {**info, "cycle": cycle, "n_cycles": n_cycles, "stage_name": stage_name}
+                )
             if stage_name == "stage1":
-                result, current_params = run_stage1(current_params, weights=weights, optimizer=stage1_optimizer)
+                result, current_params = run_stage1(current_params, weights=weights, optimizer=stage1_optimizer, progress_cb=stage_progress_cb)
             else:
-                result, current_params = run_stage2(current_params, weights=weights, optimizer=stage2_optimizer)
+                result, current_params = run_stage2(current_params, weights=weights, optimizer=stage2_optimizer, progress_cb=stage_progress_cb)
             records.append(CycleRecord(cycle=cycle, stage=stage_name, result=result, params=current_params))
 
         cycle_end_score = records[-1].result.best_score

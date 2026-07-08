@@ -9,6 +9,7 @@ subprocess with different arguments rather than duplicating this logic.
 from __future__ import annotations
 
 import argparse
+import json
 import pickle
 import sys
 from pathlib import Path
@@ -20,11 +21,12 @@ from flyingwing.geometry.params_io import load_design_parameters
 from flyingwing.geometry.aircraft import build_aircraft
 from flyingwing.objective.metrics import evaluate_design
 from flyingwing.objective.objective import score, ObjectiveWeights
+from flyingwing.objective.performance import estimate_performance
 from flyingwing.optimization.hierarchical import HierarchicalGridSearch
 from flyingwing.optimization.cycle import run_multi_cycle
 from flyingwing.viz.geometry_plots import save_all as save_geometry_plots
 from flyingwing.viz.optimization_plots import plot_multi_cycle_convergence
-from flyingwing.config import OUTPUT_DIR
+from flyingwing.config import OUTPUT_DIR, CRUISE_SPEED_MS
 
 
 def parse_args():
@@ -53,6 +55,12 @@ def _load_weights(weights_yaml: str | None) -> ObjectiveWeights:
     return ObjectiveWeights()
 
 
+def _print_progress(info: dict) -> None:
+    """One machine-parseable line per optimizer stage, for the GUI's Run tab
+    to poll and render as a progress readout (see gui/run_manager.py)."""
+    print(f"PROGRESS {json.dumps(info)}", flush=True)
+
+
 def main():
     args = parse_args()
 
@@ -76,6 +84,7 @@ def main():
         baseline, n_cycles=args.n_cycles, weights=weights,
         stage1_optimizer=stage1_optimizer, stage2_optimizer=stage2_optimizer,
         start_with=args.start_with, convergence_tol=args.convergence_tol,
+        progress_cb=_print_progress,
     )
 
     best_metrics = mc.best_record.result.best_candidate.extra["metrics"]
@@ -89,7 +98,7 @@ def main():
     for field in [
         "span_m", "aspect_ratio", "wing_area_m2",
         "cruise_L_over_D", "fast_L_over_D", "root_cl_max", "min_safety_factor",
-        "total_structural_mass_kg", "payload_volume_margin_m3",
+        "total_structural_mass_kg", "payload_volume_margin_m3", "static_margin",
     ]:
         b = getattr(baseline_metrics, field)
         o = getattr(best_metrics, field)
@@ -97,6 +106,16 @@ def main():
 
     out_dir = OUTPUT_DIR / args.output_dir_name
     aircraft = build_aircraft(best_params)
+
+    perf = estimate_performance(aircraft, best_metrics.total_structural_mass_kg, CRUISE_SPEED_MS)
+    battery_range = (
+        f"{best_metrics.battery_x_min_m * 1000:.0f}-{best_metrics.battery_x_max_m * 1000:.0f} mm from root LE"
+        if best_metrics.battery_range_feasible else "none feasible within the airframe"
+    )
+    print(f"\nBattery x-range for target static margin: {battery_range}")
+    print(f"Best glide ratio: {perf.glide_ratio_max:.1f}  at alpha {perf.glide_alpha_deg:.1f} deg  (glide angle {perf.glide_angle_deg:.1f} deg, sink {perf.sink_rate_ms:.2f} m/s)")
+    print(f"Cruise power: {perf.cruise_power_w:.1f} W   Est. endurance: {perf.estimated_endurance_min:.0f} min   Est. range: {perf.estimated_range_km:.0f} km")
+
     save_geometry_plots(aircraft, out_dir)
     plot_multi_cycle_convergence(mc).write_html(str(out_dir / "multi_cycle_convergence.html"), include_plotlyjs="cdn")
 

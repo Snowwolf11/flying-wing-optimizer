@@ -10,6 +10,7 @@ subprocess with different arguments rather than duplicating this logic.
 from __future__ import annotations
 
 import argparse
+import json
 import pickle
 import sys
 from pathlib import Path
@@ -21,11 +22,12 @@ from flyingwing.geometry.params_io import load_design_parameters
 from flyingwing.geometry.aircraft import build_aircraft
 from flyingwing.objective.metrics import evaluate_design
 from flyingwing.objective.objective import score, ObjectiveWeights
+from flyingwing.objective.performance import estimate_performance
 from flyingwing.optimization.hierarchical import HierarchicalGridSearch
 from flyingwing.optimization.stage1 import run_stage1, make_stage1_parameter_set
 from flyingwing.viz.geometry_plots import save_all as save_geometry_plots
 from flyingwing.viz.optimization_plots import save_all as save_optimization_plots
-from flyingwing.config import OUTPUT_DIR
+from flyingwing.config import OUTPUT_DIR, CRUISE_SPEED_MS
 
 
 def parse_args():
@@ -49,6 +51,12 @@ def _load_weights(weights_yaml: str | None) -> ObjectiveWeights:
     return ObjectiveWeights()
 
 
+def _print_progress(info: dict) -> None:
+    """One machine-parseable line per optimizer stage, for the GUI's Run tab
+    to poll and render as a progress readout (see gui/run_manager.py)."""
+    print(f"PROGRESS {json.dumps(info)}", flush=True)
+
+
 def main():
     args = parse_args()
 
@@ -65,7 +73,7 @@ def main():
     )
 
     print("Running Stage 1 optimization...", flush=True)
-    result, best_params = run_stage1(baseline, weights=weights, optimizer=optimizer)
+    result, best_params = run_stage1(baseline, weights=weights, optimizer=optimizer, progress_cb=_print_progress)
     best_metrics = result.best_candidate.extra["metrics"]
     best_score = result.best_candidate.score
 
@@ -76,7 +84,7 @@ def main():
     print(f"{'metric':<28}{'baseline':>12}{'optimized':>12}")
     for field in [
         "cruise_L_over_D", "fast_L_over_D", "root_cl_max", "min_safety_factor",
-        "total_structural_mass_kg", "payload_volume_margin_m3",
+        "total_structural_mass_kg", "payload_volume_margin_m3", "static_margin",
     ]:
         b = getattr(baseline_metrics, field)
         o = getattr(best_metrics, field)
@@ -84,6 +92,15 @@ def main():
 
     out_dir = OUTPUT_DIR / args.output_dir_name
     aircraft = build_aircraft(best_params)
+    perf = estimate_performance(aircraft, best_metrics.total_structural_mass_kg, CRUISE_SPEED_MS)
+    battery_range = (
+        f"{best_metrics.battery_x_min_m * 1000:.0f}-{best_metrics.battery_x_max_m * 1000:.0f} mm from root LE"
+        if best_metrics.battery_range_feasible else "none feasible within the airframe"
+    )
+    print(f"\nBattery x-range for target static margin: {battery_range}")
+    print(f"Best glide ratio: {perf.glide_ratio_max:.1f}  at alpha {perf.glide_alpha_deg:.1f} deg  (glide angle {perf.glide_angle_deg:.1f} deg, sink {perf.sink_rate_ms:.2f} m/s)")
+    print(f"Cruise power: {perf.cruise_power_w:.1f} W   Est. endurance: {perf.estimated_endurance_min:.0f} min   Est. range: {perf.estimated_range_km:.0f} km")
+
     save_geometry_plots(aircraft, out_dir)
 
     parameter_set = make_stage1_parameter_set(baseline)

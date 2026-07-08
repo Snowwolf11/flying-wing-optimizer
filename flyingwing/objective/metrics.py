@@ -19,9 +19,11 @@ from ..analysis.airfoil_2d import evaluate_section, reynolds_number
 from ..analysis.aero_3d import analyze_aerobuildup
 from ..analysis.structures import analyze_structures
 from .mass import estimate_mass
+from .cg import estimate_cg
 from ..config import (
     CRUISE_SPEED_MS, TOP_SPEED_MS, DESIGN_LOAD_FACTOR_G,
-    MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M, SPAR_DEPTH_FRACTION_THICKNESS,
+    MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M, MAX_Z_CURVATURE_PER_M,
+    SPAR_DEPTH_FRACTION_THICKNESS,
 )
 
 
@@ -43,6 +45,7 @@ class DesignMetrics:
     min_local_thickness_margin: float = float("nan")
     min_spar_depth_margin: float = float("nan")
     le_curvature_violation: float = float("nan")  # 0 if compliant, > 0 = amount max curvature exceeds the bound
+    z_curvature_violation: float = float("nan")  # 0 if compliant, > 0 = amount max vertical (winglet) curvature exceeds the bound
 
     # Geometry
     wing_area_m2: float = float("nan")
@@ -63,7 +66,13 @@ class DesignMetrics:
 
     # Stability (cruise condition)
     cruise_Cm: float = float("nan")
-    static_margin: float = float("nan")  # relative to the placeholder 25%-MAC xyz_ref -- see aero_3d.py
+    neutral_point_x_m: float = float("nan")
+    mean_aerodynamic_chord_m: float = float("nan")
+    cg_x_m: float = float("nan")  # assumed CG (battery at cg.BATTERY_X_FRACTION_CHORD) -- see objective/cg.py
+    static_margin: float = float("nan")  # (neutral_point_x_m - cg_x_m) / mean_aerodynamic_chord_m -- a real CG-based value, not a placeholder
+    battery_x_min_m: float = float("nan")  # battery x-range keeping static_margin in cg.DEFAULT_STATIC_MARGIN_TARGET
+    battery_x_max_m: float = float("nan")
+    battery_range_feasible: bool = False
 
     # Root-section 2D characteristics (stall margin, self-trim behavior)
     root_cl_max: float = float("nan")
@@ -100,6 +109,7 @@ def evaluate_design(
         aircraft, cruise_trim_cl=cruise.trim_CL, speed_ms=cruise_speed_ms, load_factor_g=load_factor_g,
     )
     mass = estimate_mass(aircraft, structures)
+    cg = estimate_cg(aircraft, structures, mass, neutral_point_x_m=cruise.neutral_point_x_m, mac_m=aircraft.mean_aerodynamic_chord_m)
 
     thickness_diff = np.diff(aircraft.thickness_ratio)
     thickness_monotonic_violation = float(max(np.max(thickness_diff), 0.0))
@@ -118,6 +128,9 @@ def evaluate_design(
     le_curvature = curve_curvature(aircraft.x_le_m, aircraft.span_station_m)
     le_curvature_violation = float(max(np.max(le_curvature) - MAX_LE_CURVATURE_PER_M, 0.0))
 
+    z_curvature = curve_curvature(aircraft.z_le_m, aircraft.span_station_m)
+    z_curvature_violation = float(max(np.max(z_curvature) - MAX_Z_CURVATURE_PER_M, 0.0))
+
     return DesignMetrics(
         valid=constraints.valid,
         constraint_violations=constraints.violations,
@@ -130,6 +143,7 @@ def evaluate_design(
         min_local_thickness_margin=min_local_thickness_margin,
         min_spar_depth_margin=min_spar_depth_margin,
         le_curvature_violation=le_curvature_violation,
+        z_curvature_violation=z_curvature_violation,
         wing_area_m2=aircraft.wing_area_m2,
         aspect_ratio=aircraft.aspect_ratio,
         span_m=aircraft.params.planform.span_m,
@@ -142,7 +156,13 @@ def evaluate_design(
         fast_CD=fast.trim_CD,
         fast_L_over_D=fast.trim_L_over_D,
         cruise_Cm=cruise.Cm,
-        static_margin=cruise.static_margin_vs_xyz_ref,
+        neutral_point_x_m=cruise.neutral_point_x_m,
+        mean_aerodynamic_chord_m=aircraft.mean_aerodynamic_chord_m,
+        cg_x_m=cg.cg_x_assumed_m,
+        static_margin=cg.static_margin_assumed,
+        battery_x_min_m=cg.battery_x_min_m,
+        battery_x_max_m=cg.battery_x_max_m,
+        battery_range_feasible=cg.battery_range_feasible,
         root_cl_max=root_section.cl_max,
         root_cm_zero_lift=root_section.cm_zero_lift,
         min_safety_factor=structures.min_safety_factor,

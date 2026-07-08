@@ -16,6 +16,30 @@ from .design_tab import build_params_from_inputs, DESIGN_STATE_INPUTS
 
 _INPUT_STYLE = {"width": "90px", "marginRight": "10px"}
 _LABEL_STYLE = {"width": "220px", "display": "inline-block"}
+_PROGRESS_BAR_FILL_BASE_STYLE = {
+    "height": "100%", "width": "0%", "backgroundColor": "#2ca02c",
+    "transition": "width 0.5s ease", "borderRadius": "4px",
+}
+
+
+def _progress_display() -> tuple[dict, str]:
+    """(bar-fill style, readout text) from the running script's most recent
+    PROGRESS line (see run_manager.progress()). Empty/zero-width if no
+    progress has been reported yet (e.g. still evaluating the first batch)."""
+    info = run_manager.progress()
+    if not info:
+        return dict(_PROGRESS_BAR_FILL_BASE_STYLE), ""
+
+    done = info.get("evals_done", 0)
+    total = max(1, info.get("evals_total", 1))
+    pct = max(0.0, min(100.0, 100.0 * done / total))
+
+    label = f"Stage {info.get('stage')}/{info.get('n_stages')}"
+    if "cycle" in info:
+        label = f"Cycle {info['cycle'] + 1}/{info.get('n_cycles', '?')} ({info.get('stage_name', '?')}) -- {label}"
+
+    text = f"{label} -- {done}/{total} evaluations (est.) -- best score so far: {info.get('best_score', float('nan')):.2f}"
+    return {**_PROGRESS_BAR_FILL_BASE_STYLE, "width": f"{pct:.0f}%"}, text
 
 
 def _row(label, id_, value, step=None) -> html.Div:
@@ -104,11 +128,20 @@ def layout() -> html.Div:
 
             html.Button("Start Run", id="start-run-button", n_clicks=0, style={"marginTop": "14px"}),
             html.Div(id="run-status-display", style={"marginTop": "10px", "fontFamily": "monospace", "whiteSpace": "pre-wrap"}),
+            html.Div(
+                html.Div(id="run-progress-bar-fill", style=dict(_PROGRESS_BAR_FILL_BASE_STYLE)),
+                id="run-progress-bar-track",
+                style={
+                    "marginTop": "8px", "height": "18px", "width": "100%",
+                    "backgroundColor": "#333", "borderRadius": "4px", "overflow": "hidden",
+                },
+            ),
+            html.Div(id="run-progress-text", style={"marginTop": "4px", "fontFamily": "monospace", "fontSize": "13px"}),
             html.Pre(id="run-log-display", style={
                 "marginTop": "10px", "height": "300px", "overflowY": "scroll",
                 "backgroundColor": "#111", "color": "#0f0", "padding": "8px", "fontSize": "12px",
             }),
-            dcc.Interval(id="run-poll-interval", interval=2000, disabled=True),
+            dcc.Interval(id="run-poll-interval", interval=1000, disabled=True),
         ],
         style={"padding": "10px"},
     )
@@ -138,6 +171,9 @@ def register_callbacks(app: dash.Dash) -> None:
     @app.callback(
         Output("run-status-display", "children"),
         Output("run-poll-interval", "disabled"),
+        Output("run-progress-bar-fill", "style"),
+        Output("run-progress-text", "children"),
+        Output("run-log-display", "children"),
         Input("start-run-button", "n_clicks"),
         Input("run-poll-interval", "n_intervals"),
         State("run-type-dropdown", "value"),
@@ -166,17 +202,18 @@ def register_callbacks(app: dash.Dash) -> None:
             log = run_manager.read_log_tail()
             run = run_manager.get_current_run()
             name = run.output_dir_name if run else "?"
+            bar_style, progress_text = _progress_display()
             if st == "running":
-                return f"Running ({name})...\n\n{log}", False
+                return f"Running ({name})...", False, bar_style, progress_text, log
             if st == "completed":
-                return f"Completed ({name}). Open the Results tab and select '{name}' to inspect it.\n\n{log}", True
+                return f"Completed ({name}). Open the Results tab and select '{name}' to inspect it.", True, bar_style, progress_text, log
             if st == "failed":
-                return f"FAILED ({name}) -- see log below.\n\n{log}", True
-            return "Idle.", True
+                return f"FAILED ({name}) -- see log below.", True, bar_style, progress_text, log
+            return "Idle.", True, dict(_PROGRESS_BAR_FILL_BASE_STYLE), "", ""
 
         # triggered by the Start Run button
         if run_manager.is_running():
-            return "A run is already in progress -- wait for it to finish first.", False
+            return "A run is already in progress -- wait for it to finish first.", False, dash.no_update, dash.no_update, dash.no_update
 
         output_dir_name = f"{run_type}_run_{datetime.now():%Y%m%d_%H%M%S}"
 
@@ -186,7 +223,7 @@ def register_callbacks(app: dash.Dash) -> None:
             baseline = build_params_from_inputs(*design_state_values)
         else:
             if not existing_result_name:
-                return "Pick an existing result to use as the baseline first.", True
+                return "Pick an existing result to use as the baseline first.", True, dash.no_update, dash.no_update, dash.no_update
             data = results_io.load_run(existing_result_name)
             baseline = results_io.run_best_params(data)
 
@@ -214,4 +251,4 @@ def register_callbacks(app: dash.Dash) -> None:
             ]
 
         run_manager.launch_run(run_type, args, output_dir_name)
-        return f"Started {run_type} run '{output_dir_name}'...", False
+        return f"Started {run_type} run '{output_dir_name}'...", False, dict(_PROGRESS_BAR_FILL_BASE_STYLE), "", ""

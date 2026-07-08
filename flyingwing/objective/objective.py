@@ -31,7 +31,7 @@ import yaml
 from .metrics import DesignMetrics
 from ..config import (
     FUSELAGE_MIN_INTERNAL_HEIGHT_M, FUSELAGE_MIN_INTERNAL_LENGTH_M,
-    MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M,
+    MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M, MAX_Z_CURVATURE_PER_M,
 )
 
 # Reference scales used only to make constraint-violation terms of very
@@ -54,10 +54,11 @@ class ObjectiveWeights:
     w_safety_factor: float = 0.05  # threshold, penalizes only if below safety_factor_min
     safety_factor_min: float = 1.5
 
-    # Stability. Disabled (weight 0) by default: static margin is computed
-    # relative to a placeholder 25%-MAC reference point, not a real CG, so
-    # it isn't meaningful to optimize against until mass-distribution/CG
-    # modeling exists. Turn it on once that's in place.
+    # Stability. static_margin now uses a real (though assumption-heavy)
+    # component-mass-and-position CG estimate (objective/cg.py), not a
+    # placeholder reference point -- it's meaningful to optimize against.
+    # Still disabled (weight 0) by default so existing tuned weight files
+    # don't silently change behavior; enable deliberately.
     w_static_margin: float = 0.0
     static_margin_target: tuple[float, float] = (0.02, 0.15)
 
@@ -107,6 +108,7 @@ def _constraint_penalty(metrics: DesignMetrics) -> float:
     penalty += max(0.0, -metrics.min_local_thickness_margin) / MIN_ABSOLUTE_THICKNESS_M
     penalty += max(0.0, -metrics.min_spar_depth_margin) / MIN_SPAR_DEPTH_M
     penalty += metrics.le_curvature_violation / MAX_LE_CURVATURE_PER_M
+    penalty += metrics.z_curvature_violation / MAX_Z_CURVATURE_PER_M
     return penalty
 
 

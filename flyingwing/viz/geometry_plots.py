@@ -13,6 +13,45 @@ from plotly.subplots import make_subplots
 from ..geometry.aircraft import Aircraft
 from ..geometry.mesh import build_watertight_mesh
 from ..geometry.airfoil_family import generate_airfoil_surfaces
+from ..config import FUSELAGE_MIN_INTERNAL_WIDTH_M
+
+
+def _fuselage_box_bounds(aircraft: Aircraft) -> tuple[float, float, float, float, float, float]:
+    """(x_min, x_max, y_min, y_max, z_min, z_max) of the required internal
+    fuselage box. x/z come directly from geometry.fuselage.check_fuselage_fit's
+    search for the best-fitting placement (already computed once per
+    build_aircraft() call, stored on aircraft.fuselage_fit) -- width is
+    fixed by symmetry about the centerline. If no valid placement was found
+    (aircraft.fuselage_fit.fits is False and box_x_min_m is NaN), falls back
+    to a simple root-chord-centered box purely so there's still something to
+    draw."""
+    half_width = FUSELAGE_MIN_INTERNAL_WIDTH_M / 2.0
+    fit = aircraft.fuselage_fit
+
+    if np.isnan(fit.box_x_min_m):
+        from ..config import FUSELAGE_MIN_INTERNAL_HEIGHT_M, FUSELAGE_MIN_INTERNAL_LENGTH_M
+        x_center = float(aircraft.x_le_m[0] + aircraft.chord_m[0] / 2.0)
+        z_center = float(aircraft.z_le_m[0])
+        return (
+            x_center - FUSELAGE_MIN_INTERNAL_LENGTH_M / 2.0, x_center + FUSELAGE_MIN_INTERNAL_LENGTH_M / 2.0,
+            -half_width, half_width,
+            z_center - FUSELAGE_MIN_INTERNAL_HEIGHT_M / 2.0, z_center + FUSELAGE_MIN_INTERNAL_HEIGHT_M / 2.0,
+        )
+
+    return (fit.box_x_min_m, fit.box_x_max_m, -half_width, half_width, fit.box_z_min_m, fit.box_z_max_m)
+
+
+def _fuselage_box_mesh3d(aircraft: Aircraft) -> go.Mesh3d:
+    x0, x1, y0, y1, z0, z1 = _fuselage_box_bounds(aircraft)
+    xs = [x0, x0, x1, x1, x0, x0, x1, x1]
+    ys = [y0, y1, y1, y0, y0, y1, y1, y0]
+    zs = [z0, z0, z0, z0, z1, z1, z1, z1]
+    # alphahull=0 -> convex hull of the 8 corner points, i.e. exactly a box,
+    # without hand-rolling face-index triangulation.
+    return go.Mesh3d(
+        x=xs, y=ys, z=zs, alphahull=0,
+        color="orange", opacity=0.3, name="required fuselage box", showlegend=True,
+    )
 
 
 def plot_3d_aircraft(aircraft: Aircraft) -> go.Figure:
@@ -29,7 +68,9 @@ def plot_3d_aircraft(aircraft: Aircraft) -> go.Figure:
                 lighting=dict(ambient=0.5, diffuse=0.8, specular=0.3, roughness=0.5),
                 lightposition=dict(x=0, y=1000, z=1000),
                 showscale=False,
-            )
+                name="aircraft",
+            ),
+            _fuselage_box_mesh3d(aircraft),
         ]
     )
     fig.update_layout(
@@ -90,7 +131,28 @@ def plot_orthographic_views(aircraft: Aircraft) -> go.Figure:
     fig.update_xaxes(title_text="x (m)", row=1, col=3)
     fig.update_yaxes(title_text="z (m)", row=1, col=3, scaleanchor="x3")
 
-    fig.update_layout(title="Flying Wing -- Orthographic Views", showlegend=False, height=450)
+    # Required fuselage box outline, dashed, on all three views -- same box
+    # as plot_3d_aircraft's Mesh3d, projected onto each 2D plane.
+    x0, x1, y0, y1, z0, z1 = _fuselage_box_bounds(aircraft)
+    box_style = dict(mode="lines", line=dict(color="orange", dash="dash"), name="fuselage box", showlegend=False)
+
+    def _rect(a0, a1, b0, b1):
+        return [a0, a1, a1, a0, a0], [b0, b0, b1, b1, b0]
+
+    rx, ry = _rect(y0, y1, x0, x1)
+    fig.add_trace(go.Scatter(x=rx, y=ry, **box_style), row=1, col=1)
+    rx, ry = _rect(y0, y1, z0, z1)
+    fig.add_trace(go.Scatter(x=rx, y=ry, **box_style), row=1, col=2)
+    rx, ry = _rect(x0, x1, z0, z1)
+    fig.add_trace(go.Scatter(x=rx, y=ry, **box_style), row=1, col=3)
+
+    fit_status = "OK" if aircraft.fuselage_fit.fits else "FAILS"
+    fig.update_layout(
+        title=f"Flying Wing -- Orthographic Views  (fuselage fit: {fit_status}, "
+              f"height margin {aircraft.fuselage_fit.min_height_margin_m * 1000:+.1f} mm, "
+              f"length margin {aircraft.fuselage_fit.min_length_margin_m * 1000:+.1f} mm)",
+        showlegend=False, height=450,
+    )
     return fig
 
 
