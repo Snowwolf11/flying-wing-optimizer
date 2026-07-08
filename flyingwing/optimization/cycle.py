@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..geometry.params import DesignParameters
-from ..objective.objective import ObjectiveWeights
+from ..objective.objective import ObjectiveWeights, NormalizationConstants
 from .base import OptimizationResult
 from .hierarchical import HierarchicalGridSearch, ProgressCallback
 from .stage1 import run_stage1
@@ -45,6 +45,7 @@ def run_multi_cycle(
     initial_params: DesignParameters,
     n_cycles: int = 2,
     weights: ObjectiveWeights | None = None,
+    normalization: NormalizationConstants | None = None,
     stage1_optimizer: HierarchicalGridSearch | None = None,
     stage2_optimizer: HierarchicalGridSearch | None = None,
     start_with: str = "stage1",
@@ -56,6 +57,7 @@ def run_multi_cycle(
     improves by less than that amount over the previous cycle's.
     """
     weights = weights or ObjectiveWeights()
+    normalization = normalization or NormalizationConstants()
     stage1_optimizer = stage1_optimizer or HierarchicalGridSearch()
     stage2_optimizer = stage2_optimizer or HierarchicalGridSearch()
 
@@ -73,9 +75,9 @@ def run_multi_cycle(
                     {**info, "cycle": cycle, "n_cycles": n_cycles, "stage_name": stage_name}
                 )
             if stage_name == "stage1":
-                result, current_params = run_stage1(current_params, weights=weights, optimizer=stage1_optimizer, progress_cb=stage_progress_cb)
+                result, current_params = run_stage1(current_params, weights=weights, normalization=normalization, optimizer=stage1_optimizer, progress_cb=stage_progress_cb)
             else:
-                result, current_params = run_stage2(current_params, weights=weights, optimizer=stage2_optimizer, progress_cb=stage_progress_cb)
+                result, current_params = run_stage2(current_params, weights=weights, normalization=normalization, optimizer=stage2_optimizer, progress_cb=stage_progress_cb)
             records.append(CycleRecord(cycle=cycle, stage=stage_name, result=result, params=current_params))
 
         cycle_end_score = records[-1].result.best_score

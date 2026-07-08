@@ -21,7 +21,7 @@ from ..analysis.structures import analyze_structures
 from .mass import estimate_mass
 from .cg import estimate_cg
 from ..config import (
-    CRUISE_SPEED_MS, TOP_SPEED_MS, DESIGN_LOAD_FACTOR_G,
+    CRUISE_SPEED_MS, TOP_SPEED_MS, DESIGN_LOAD_FACTOR_G, GRAVITY_M_S2,
     MIN_ABSOLUTE_THICKNESS_M, MIN_SPAR_DEPTH_M, MAX_LE_CURVATURE_PER_M, MAX_Z_CURVATURE_PER_M,
     SPAR_DEPTH_FRACTION_THICKNESS,
 )
@@ -64,12 +64,27 @@ class DesignMetrics:
     fast_CD: float = float("nan")
     fast_L_over_D: float = float("nan")
 
+    # Soaring/glide proxies at the cruise trim condition -- cheap (reuse the
+    # already-computed cruise trim L/D, no extra alpha sweep), unlike
+    # objective/performance.py's more precise best-glide-alpha sweep, which
+    # is deliberately kept out of evaluate_design() since it runs thousands
+    # of times per optimizer run.
+    cruise_glide_angle_deg: float = float("nan")  # atan(1/cruise_L_over_D) -- shallower (smaller) is better
+    soaring_power_w: float = float("nan")  # weight * sink rate at cruise trim -- lower means the design stays aloft in weaker lift
+
     # Stability (cruise condition)
     cruise_Cm: float = float("nan")
     neutral_point_x_m: float = float("nan")
     mean_aerodynamic_chord_m: float = float("nan")
-    cg_x_m: float = float("nan")  # assumed CG (battery at cg.BATTERY_X_FRACTION_CHORD) -- see objective/cg.py
+    cg_x_m: float = float("nan")  # assumed CG (battery at the fuselage box centroid) -- see objective/cg.py
     static_margin: float = float("nan")  # (neutral_point_x_m - cg_x_m) / mean_aerodynamic_chord_m -- a real CG-based value, not a placeholder
+
+    # Roll (lateral) stability -- "dihedral effect," the roll moment per unit
+    # sideslip. Negative is roll-stable (a gust-induced sideslip rolls the
+    # aircraft back toward wings-level); positive is roll-unstable. Cheap --
+    # AeroBuildup's run_with_stability_derivatives() already computes this
+    # alongside Cma/CLa at the cruise trim condition, just unused until now.
+    cruise_Clb_per_rad: float = float("nan")
     battery_x_min_m: float = float("nan")  # battery x-range keeping static_margin in cg.DEFAULT_STATIC_MARGIN_TARGET
     battery_x_max_m: float = float("nan")
     battery_range_feasible: bool = False
@@ -131,6 +146,15 @@ def evaluate_design(
     z_curvature = curve_curvature(aircraft.z_le_m, aircraft.span_station_m)
     z_curvature_violation = float(max(np.max(z_curvature) - MAX_Z_CURVATURE_PER_M, 0.0))
 
+    if cruise.trim_L_over_D > 0:
+        cruise_glide_angle_deg = float(np.degrees(np.arctan2(1.0, cruise.trim_L_over_D)))
+        sink_rate_ms = cruise_speed_ms * float(np.sin(np.radians(cruise_glide_angle_deg)))
+        weight_n = (mass.total_structural_mass_kg + cg.battery_mass_kg) * GRAVITY_M_S2
+        soaring_power_w = weight_n * sink_rate_ms
+    else:
+        cruise_glide_angle_deg = float("nan")
+        soaring_power_w = float("nan")
+
     return DesignMetrics(
         valid=constraints.valid,
         constraint_violations=constraints.violations,
@@ -155,7 +179,10 @@ def evaluate_design(
         fast_CL=fast.trim_CL,
         fast_CD=fast.trim_CD,
         fast_L_over_D=fast.trim_L_over_D,
+        cruise_glide_angle_deg=cruise_glide_angle_deg,
+        soaring_power_w=soaring_power_w,
         cruise_Cm=cruise.Cm,
+        cruise_Clb_per_rad=cruise.Clb_per_rad,
         neutral_point_x_m=cruise.neutral_point_x_m,
         mean_aerodynamic_chord_m=aircraft.mean_aerodynamic_chord_m,
         cg_x_m=cg.cg_x_assumed_m,

@@ -20,6 +20,7 @@ from dash import dcc, html, Input, Output, State, ALL
 from dash.exceptions import PreventUpdate
 
 from ..geometry.params import DesignParameters, Planform, AirfoilSchedule
+from ..geometry.params_io import save_design_parameters, load_default_design_parameters, DEFAULT_DESIGN_YAML
 from ..geometry.spanwise import SpanwiseDistribution
 from ..geometry.aircraft import build_aircraft
 from ..geometry.constraints import check_all_constraints
@@ -31,11 +32,29 @@ from ..viz.structures_plots import plot_structures
 from ..analysis.aero_3d import analyze_aerobuildup
 from ..analysis.structures import analyze_structures
 from ..objective.metrics import evaluate_design
-from ..objective.objective import score
+from ..objective.objective import score, ObjectiveWeights, NormalizationConstants
 from ..objective.performance import estimate_performance
 from ..config import CRUISE_SPEED_MS, OUTPUT_DIR
+from .numeric import parse_number
 
-_DEFAULT = DesignParameters()
+WEIGHTS_YAML = "configs/objective_weights.yaml"
+NORMALIZATION_YAML = "configs/normalization.yaml"
+
+_DEFAULT = load_default_design_parameters()
+
+
+def _load_current_weights() -> ObjectiveWeights:
+    try:
+        return ObjectiveWeights.from_yaml(WEIGHTS_YAML)
+    except FileNotFoundError:
+        return ObjectiveWeights()
+
+
+def _load_current_normalization() -> NormalizationConstants:
+    try:
+        return NormalizationConstants.from_yaml(NORMALIZATION_YAML)
+    except FileNotFoundError:
+        return NormalizationConstants()
 
 _INPUT_STYLE = {"width": "70px", "marginRight": "4px"}
 _LABEL_STYLE = {"width": "150px", "display": "inline-block", "fontWeight": "bold"}
@@ -47,9 +66,12 @@ _TABLE_INPUT_STYLE = {"width": "62px", "fontSize": "12px"}
 
 
 def _cell_input(id_type: str, index: int, value: float, step: float, disabled: bool = False) -> html.Td:
+    # type="text", not "number" -- see gui/numeric.py's module docstring for
+    # why (native number inputs silently reject one of '.'/',' on a non-US
+    # locale, with no way to detect or fix that from Python).
     return html.Td(
         dcc.Input(
-            id={"type": id_type, "index": index}, type="number", value=value, step=step, disabled=disabled,
+            id={"type": id_type, "index": index}, type="text", inputMode="decimal", value=value, disabled=disabled,
             style={**_TABLE_INPUT_STYLE, "backgroundColor": "#eee" if disabled else "white"},
         ),
         style=_TD_STYLE,
@@ -183,9 +205,9 @@ def layout() -> html.Div:
                 [
                     html.Label("Global:", style={"fontWeight": "bold", "marginRight": "8px"}),
                     html.Label("Span (m)", style={**_LABEL_STYLE, "width": "70px"}),
-                    dcc.Input(id="span-input", type="number", value=p.span_m, step=0.01, style=_INPUT_STYLE),
+                    dcc.Input(id="span-input", type="text", inputMode="decimal", value=p.span_m, style=_INPUT_STYLE),
                     html.Label("Sweep (deg)", style={**_LABEL_STYLE, "width": "80px", "marginLeft": "20px"}),
-                    dcc.Input(id="sweep-input", type="number", value=p.sweep_deg, step=0.5, style=_INPUT_STYLE),
+                    dcc.Input(id="sweep-input", type="text", inputMode="decimal", value=p.sweep_deg, style=_INPUT_STYLE),
                 ],
                 style={"marginBottom": "10px"},
             ),
@@ -197,6 +219,16 @@ def layout() -> html.Div:
             dcc.Loading(html.Div(id="evaluation-display", style={"marginTop": "10px", "fontFamily": "monospace", "whiteSpace": "pre-wrap"})),
             html.Button("Export STL", id="export-stl-button", n_clicks=0, style={"marginTop": "10px"}),
             dcc.Download(id="design-download-stl"),
+            html.Hr(style={"marginTop": "16px"}),
+            html.Button("Save as Default Design", id="save-default-design-button", n_clicks=0),
+            html.P(
+                f"Overwrites {DEFAULT_DESIGN_YAML} with whatever's currently in this tab -- becomes "
+                "the baseline every script/GUI run uses when none is otherwise specified. Takes effect "
+                "the next time an optimizer run is launched or the GUI is restarted (this tab's own "
+                "values don't change).",
+                style={"fontStyle": "italic", "color": "#666", "fontSize": "12px", "marginTop": "4px"},
+            ),
+            html.Div(id="save-default-design-status", style={"marginTop": "4px", "fontFamily": "monospace", "fontSize": "12px"}),
         ],
         style={"width": "420px", "display": "inline-block", "verticalAlign": "top", "padding": "10px", "overflowY": "auto", "maxHeight": "95vh"},
     )
@@ -217,6 +249,19 @@ def layout() -> html.Div:
 
 
 def build_params_from_inputs(span, sweep, planform_y, chord, twist, le, z, airfoil_y, thickness, camber, reflex) -> DesignParameters:
+    """Every arg is a raw dcc.Input(type="text") value (or a list of them)
+    -- parse_number()'d here so every caller (this tab's own callbacks and
+    run_tab.py, which also calls this directly) gets the '.'/',' robustness
+    for free, in one place."""
+    span, sweep = parse_number(span), parse_number(sweep)
+    planform_y, chord, twist, le, z = (
+        [parse_number(v) for v in planform_y], [parse_number(v) for v in chord], [parse_number(v) for v in twist],
+        [parse_number(v) for v in le], [parse_number(v) for v in z],
+    )
+    airfoil_y, thickness, camber, reflex = (
+        [parse_number(v) for v in airfoil_y], [parse_number(v) for v in thickness],
+        [parse_number(v) for v in camber], [parse_number(v) for v in reflex],
+    )
     planform = Planform(
         span_m=span, sweep_deg=sweep, y_control=tuple(planform_y),
         chord_m=tuple(chord), twist_deg=tuple(twist),
@@ -281,6 +326,10 @@ def register_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def edit_planform_stations(n_add, remove_clicks, y_control, chord, twist, le, z):
+        y_control, chord, twist, le, z = (
+            [parse_number(v) for v in y_control], [parse_number(v) for v in chord], [parse_number(v) for v in twist],
+            [parse_number(v) for v in le], [parse_number(v) for v in z],
+        )
         if any(v is None for v in [*y_control, *chord, *twist, *le, *z]) or not _strictly_increasing(y_control):
             raise PreventUpdate
 
@@ -311,6 +360,10 @@ def register_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def edit_airfoil_stations(n_add, remove_clicks, y_control, thickness, camber, reflex):
+        y_control, thickness, camber, reflex = (
+            [parse_number(v) for v in y_control], [parse_number(v) for v in thickness],
+            [parse_number(v) for v in camber], [parse_number(v) for v in reflex],
+        )
         if any(v is None for v in [*y_control, *thickness, *camber, *reflex]) or not _strictly_increasing(y_control):
             raise PreventUpdate
 
@@ -338,6 +391,15 @@ def register_callbacks(app: dash.Dash) -> None:
         *_GEOMETRY_INPUTS,
     )
     def update_geometry(span, sweep, planform_y, chord, twist, le, z, airfoil_y, thickness, camber, reflex):
+        span, sweep = parse_number(span), parse_number(sweep)
+        planform_y, chord, twist, le, z = (
+            [parse_number(v) for v in planform_y], [parse_number(v) for v in chord], [parse_number(v) for v in twist],
+            [parse_number(v) for v in le], [parse_number(v) for v in z],
+        )
+        airfoil_y, thickness, camber, reflex = (
+            [parse_number(v) for v in airfoil_y], [parse_number(v) for v in thickness],
+            [parse_number(v) for v in camber], [parse_number(v) for v in reflex],
+        )
         all_values = [span, sweep, *planform_y, *chord, *twist, *le, *z, *airfoil_y, *thickness, *camber, *reflex]
         if any(v is None for v in all_values):
             raise PreventUpdate
@@ -381,7 +443,7 @@ def register_callbacks(app: dash.Dash) -> None:
     def run_evaluation(n_clicks, span, sweep, planform_y, chord, twist, le, z, airfoil_y, thickness, camber, reflex):
         params = build_params_from_inputs(span, sweep, planform_y, chord, twist, le, z, airfoil_y, thickness, camber, reflex)
         metrics = evaluate_design(params)
-        result = score(metrics)
+        result = score(metrics, _load_current_weights(), _load_current_normalization())
 
         aircraft = build_aircraft(params)
         cruise_aero = analyze_aerobuildup(aircraft, CRUISE_SPEED_MS, alpha_deg=2.0)
@@ -413,6 +475,17 @@ def register_callbacks(app: dash.Dash) -> None:
             plot_spanwise_distributions(aircraft, CRUISE_SPEED_MS, cruise_aero.trim_CL),
             plot_structures(structures),
         )
+
+    @app.callback(
+        Output("save-default-design-status", "children"),
+        Input("save-default-design-button", "n_clicks"),
+        *DESIGN_STATE_INPUTS,
+        prevent_initial_call=True,
+    )
+    def save_default_design(n_clicks, span, sweep, planform_y, chord, twist, le, z, airfoil_y, thickness, camber, reflex):
+        params = build_params_from_inputs(span, sweep, planform_y, chord, twist, le, z, airfoil_y, thickness, camber, reflex)
+        save_design_parameters(params, DEFAULT_DESIGN_YAML)
+        return f"Saved to {DEFAULT_DESIGN_YAML}"
 
     @app.callback(
         Output("design-download-stl", "data"),

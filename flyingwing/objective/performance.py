@@ -17,10 +17,8 @@ import numpy as np
 from .. import _overrides as _ov
 from ..geometry.aircraft import Aircraft
 from ..analysis.aero_3d import analyze_aerobuildup
-from ..config import BOUNDS_OVERRIDES_YAML
+from ..config import BOUNDS_OVERRIDES_YAML, GRAVITY_M_S2
 from .cg import BATTERY_MASS_KG
-
-GRAVITY_M_S2 = 9.80665
 
 BATTERY_CAPACITY_MAH = 1300.0
 BATTERY_VOLTAGE_V = 14.8  # nominal 4S LiPo

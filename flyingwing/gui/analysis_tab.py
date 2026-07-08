@@ -23,9 +23,9 @@ from ..analysis.aero_3d import analyze_aerobuildup, analyze_hybrid_drag
 from ..analysis.structures import analyze_structures, analyze_torsion_and_deflection
 from ..objective.mass import estimate_mass
 from ..objective.cg import estimate_cg, DEFAULT_STATIC_MARGIN_TARGET
-from ..objective.objective import score, ObjectiveWeights
+from ..objective.objective import score, ObjectiveWeights, NormalizationConstants
 from ..objective.performance import estimate_performance
-from ..viz.analysis_plots import plot_objective_contributions, plot_mass_breakdown, plot_cg_diagram
+from ..viz.analysis_plots import plot_objective_contributions, plot_mass_breakdown, plot_cg_layout
 from ..viz.structures_plots import plot_structures, plot_torsion_and_deflection
 from ..viz.flow_plots import plot_cp_surface_3d
 from ..config import CRUISE_SPEED_MS, OUTPUT_DIR
@@ -33,6 +33,7 @@ from . import results_io
 
 _GRAPH_STYLE = {"height": "420px"}
 WEIGHTS_YAML = "configs/objective_weights.yaml"
+NORMALIZATION_YAML = "configs/normalization.yaml"
 
 
 def _load_current_weights() -> ObjectiveWeights:
@@ -40,6 +41,13 @@ def _load_current_weights() -> ObjectiveWeights:
         return ObjectiveWeights.from_yaml(WEIGHTS_YAML)
     except FileNotFoundError:
         return ObjectiveWeights()
+
+
+def _load_current_normalization() -> NormalizationConstants:
+    try:
+        return NormalizationConstants.from_yaml(NORMALIZATION_YAML)
+    except FileNotFoundError:
+        return NormalizationConstants()
 
 
 def layout() -> html.Div:
@@ -120,7 +128,7 @@ def register_callbacks(app: dash.Dash) -> None:
         torsion = analyze_torsion_and_deflection(aircraft, structures)
         mass = estimate_mass(aircraft, structures)
         cg = estimate_cg(aircraft, structures, mass, neutral_point_x_m=cruise.neutral_point_x_m, mac_m=aircraft.mean_aerodynamic_chord_m)
-        result = score(best_metrics, _load_current_weights())
+        result = score(best_metrics, _load_current_weights(), _load_current_normalization())
         perf = estimate_performance(aircraft, best_metrics.total_structural_mass_kg, CRUISE_SPEED_MS)
         hybrid = analyze_hybrid_drag(aircraft, CRUISE_SPEED_MS, alpha_deg=cruise.trim_alpha_deg)
         hybrid_line = (
@@ -142,7 +150,7 @@ def register_callbacks(app: dash.Dash) -> None:
 
         fig_contrib = plot_objective_contributions(result)
         fig_mass = plot_mass_breakdown(mass, cg.battery_mass_kg)
-        fig_cg = plot_cg_diagram(cg, cruise.neutral_point_x_m, aircraft.mean_aerodynamic_chord_m, DEFAULT_STATIC_MARGIN_TARGET)
+        fig_cg = plot_cg_layout(aircraft, cg, cruise.neutral_point_x_m, aircraft.mean_aerodynamic_chord_m, DEFAULT_STATIC_MARGIN_TARGET)
         fig_structures = plot_structures(structures)
         fig_torsion = plot_torsion_and_deflection(torsion)
         fig_cp_surface = plot_cp_surface_3d(aircraft, alpha_deg=cruise.trim_alpha_deg, speed_ms=CRUISE_SPEED_MS)

@@ -25,6 +25,7 @@ import numpy as np
 from scipy.integrate import cumulative_trapezoid
 
 from ..geometry.aircraft import Aircraft
+from ..geometry.airfoil_family import max_thickness_x_over_c
 from ..config import (
     AIR_DENSITY_KG_M3,
     SPAR_WIDTH_FRACTION_CHORD,
@@ -32,7 +33,6 @@ from ..config import (
     SPAR_WALL_THICKNESS_M,
     ALLOWABLE_SPAR_STRESS_PA,
     DESIGN_LOAD_FACTOR_G,
-    SPAR_X_FRACTION_CHORD,
     AERODYNAMIC_CENTER_X_FRACTION_CHORD,
     SPAR_YOUNG_MODULUS_PA,
     ALLOWABLE_SPAR_SHEAR_STRESS_PA,
@@ -172,17 +172,23 @@ class TorsionDeflectionResult:
 
 def analyze_torsion_and_deflection(
     aircraft: Aircraft, structures: StructuralProxyResult,
-    spar_x_fraction_chord: float = SPAR_X_FRACTION_CHORD,
+    spar_x_fraction_chord: float = None,
     aerodynamic_center_x_fraction_chord: float = AERODYNAMIC_CENTER_X_FRACTION_CHORD,
     spar_young_modulus_pa: float = SPAR_YOUNG_MODULUS_PA,
 ) -> TorsionDeflectionResult:
     """First-order torsion + deflection estimate on top of the existing
     bending/shear structural proxy. Torque is driven by the offset between
     the local aerodynamic center (~quarter chord, thin-airfoil-theory
-    assumption) and the assumed spar/elastic axis -- the dominant source of
-    torsion on a swept wing; each section's own pitching moment is a smaller
+    assumption) and the spar/elastic axis -- the dominant source of torsion
+    on a swept wing; each section's own pitching moment is a smaller
     secondary contribution and isn't included here (would need a per-station
-    2D analysis call, which this proxy skips to stay cheap)."""
+    2D analysis call, which this proxy skips to stay cheap). The spar axis
+    defaults to the MH64 profile's own max-thickness location (standard,
+    physically sensible spar placement, computed once from the real airfoil
+    geometry -- see geometry/airfoil_family.max_thickness_x_over_c) rather
+    than an assumed fraction."""
+    if spar_x_fraction_chord is None:
+        spar_x_fraction_chord = max_thickness_x_over_c()
     x_ac = aircraft.x_le_m + aerodynamic_center_x_fraction_chord * aircraft.chord_m
     x_spar = aircraft.x_le_m + spar_x_fraction_chord * aircraft.chord_m
     torque_per_span = structures.lift_per_span_n_per_m * (x_ac - x_spar)

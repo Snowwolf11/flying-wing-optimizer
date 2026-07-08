@@ -9,8 +9,7 @@ from datetime import datetime
 import dash
 from dash import dcc, html, Input, Output, State, ALL
 
-from ..geometry.params import default_design_parameters
-from ..geometry.params_io import save_design_parameters
+from ..geometry.params_io import save_design_parameters, load_default_design_parameters
 from . import run_manager, results_io
 from .design_tab import build_params_from_inputs, DESIGN_STATE_INPUTS
 
@@ -218,7 +217,7 @@ def register_callbacks(app: dash.Dash) -> None:
         output_dir_name = f"{run_type}_run_{datetime.now():%Y%m%d_%H%M%S}"
 
         if baseline_source == "default":
-            baseline = default_design_parameters()
+            baseline = load_default_design_parameters()
         elif baseline_source == "design_tab":
             baseline = build_params_from_inputs(*design_state_values)
         else:
@@ -233,7 +232,11 @@ def register_callbacks(app: dash.Dash) -> None:
         baseline_yaml = out_dir / "baseline.yaml"
         save_design_parameters(baseline, baseline_yaml)
 
-        common_args = ["--baseline-yaml", str(baseline_yaml), "--weights-yaml", "configs/objective_weights.yaml"]
+        common_args = [
+            "--baseline-yaml", str(baseline_yaml),
+            "--weights-yaml", "configs/objective_weights.yaml",
+            "--normalization-yaml", "configs/normalization.yaml",
+        ]
 
         if run_type == "multi_cycle":
             args = common_args + [

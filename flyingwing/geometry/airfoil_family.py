@@ -102,6 +102,42 @@ def max_thickness_ratio(thickness_scale: float) -> float:
     return thickness_scale * _base_shape().max_thickness_ratio
 
 
+@lru_cache(maxsize=1)
+def max_thickness_x_over_c() -> float:
+    """x/c where the base MH64 profile reaches its maximum thickness -- the
+    standard, physically sensible spar chordwise location (best bending
+    stiffness per unit spar mass), computed directly from the profile
+    instead of assumed as a tunable fraction. Exact, not approximate:
+    thickness_scale multiplies the whole envelope by a constant, so it never
+    shifts WHERE the peak occurs."""
+    shape = _base_shape()
+    return float(shape.x_grid[np.argmax(shape.thickness)])
+
+
+@lru_cache(maxsize=1)
+def shell_centroid_x_over_c() -> float:
+    """Arc-length-weighted x/c centroid of the base MH64 profile's upper +
+    lower surface. The shell/skin's mass follows wetted surface length, not
+    enclosed area, so this -- not an assumed chord fraction -- is the
+    physically correct chordwise centroid for shell mass. Computed once from
+    the unscaled base shape as a quick, cheap approximation (ignores the
+    small shift a given section's own thickness/camber scaling would cause)."""
+    shape = _base_shape()
+    x = shape.x_grid
+    upper = shape.camber + shape.thickness / 2.0
+    lower = shape.camber - shape.thickness / 2.0
+
+    def _surface_moment(y: np.ndarray) -> tuple[float, float]:
+        dx, dy = np.diff(x), np.diff(y)
+        ds = np.sqrt(dx ** 2 + dy ** 2)
+        x_mid = 0.5 * (x[:-1] + x[1:])
+        return float(np.sum(x_mid * ds)), float(np.sum(ds))
+
+    mx_u, len_u = _surface_moment(upper)
+    mx_l, len_l = _surface_moment(lower)
+    return (mx_u + mx_l) / (len_u + len_l)
+
+
 def generate_airfoil_surfaces(
     thickness_scale: float,
     camber_scale: float,

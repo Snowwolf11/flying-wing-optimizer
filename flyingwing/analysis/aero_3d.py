@@ -84,6 +84,8 @@ class AircraftAeroMetrics:
     neutral_point_x_m: float
     static_margin_vs_xyz_ref: float  # vs. the 25%-MAC xyz_ref (an aero-only reference point, not a real CG) -- a cheap AeroBuildup-vs-VLM cross-check value only; DesignMetrics.static_margin (objective/cg.py) uses a real CG estimate instead
 
+    Clb_per_rad: float  # roll-due-to-sideslip ("dihedral effect") stability derivative -- negative means roll-stable (a sideslip rolls the aircraft back level)
+
     trim_alpha_deg: float
     trim_CL: float
     trim_CD: float
@@ -129,6 +131,7 @@ def analyze_aerobuildup(aircraft: Aircraft, speed_ms: float, alpha_deg: float = 
     Cma = _scalar(res["Cma"])
     x_np = _scalar(res["x_np"])
     static_margin = (x_np - xyz_ref_x) / mac_m
+    Clb = _scalar(res["Clb"])
 
     trim_alpha_deg = _trim_alpha_deg(alpha_deg, Cm, Cma)
     op_trim = asb.OperatingPoint(velocity=speed_ms, alpha=trim_alpha_deg)
@@ -143,6 +146,7 @@ def analyze_aerobuildup(aircraft: Aircraft, speed_ms: float, alpha_deg: float = 
         span_efficiency=span_efficiency,
         CLa_per_rad=CLa, Cma_per_rad=Cma,
         neutral_point_x_m=x_np, static_margin_vs_xyz_ref=static_margin,
+        Clb_per_rad=Clb,
         trim_alpha_deg=trim_alpha_deg, trim_CL=trim_CL, trim_CD=trim_CD,
         trim_L_over_D=trim_CL / trim_CD if trim_CD != 0 else float("nan"),
     )
@@ -183,6 +187,7 @@ def analyze_vlm(
     Cma = _scalar(res["Cma"])
     x_np = _scalar(res["x_np"])
     static_margin = (x_np - xyz_ref_x) / mac_m
+    Clb = _scalar(res["Clb"])
 
     trim_alpha_deg = _trim_alpha_deg(alpha_deg, Cm, Cma)
     op_trim = asb.OperatingPoint(velocity=speed_ms, alpha=trim_alpha_deg)
@@ -207,6 +212,7 @@ def analyze_vlm(
         span_efficiency=span_efficiency,
         CLa_per_rad=CLa, Cma_per_rad=Cma,
         neutral_point_x_m=x_np, static_margin_vs_xyz_ref=static_margin,
+        Clb_per_rad=Clb,
         trim_alpha_deg=trim_alpha_deg, trim_CL=trim_CL, trim_CD=trim_CD,
         trim_L_over_D=trim_CL / trim_CD if trim_CD != 0 else float("nan"),
     )

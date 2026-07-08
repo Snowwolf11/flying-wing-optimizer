@@ -44,14 +44,19 @@ _TWIST_VIOLATION_REFERENCE_DEG = 2.0
 
 @dataclass
 class ObjectiveWeights:
-    # Aerodynamics (maximize)
-    w_cruise_L_over_D: float = 1.0
-    w_fast_L_over_D: float = 0.4
-    w_root_cl_max: float = 2.0
+    # Aerodynamics (maximize). Each of these is divided by the matching
+    # NormalizationConstants entry before being weighted (see score()) --
+    # weight values below were rescaled (old_weight * default-baseline value
+    # of the metric) when normalization was introduced, so a design
+    # identical to the default baseline scores exactly as it did before.
+    # Going forward, weight alone controls relative importance.
+    w_cruise_L_over_D: float = 7.558
+    w_fast_L_over_D: float = 3.837
+    w_root_cl_max: float = 2.761
 
     # Structure / mass
-    w_mass: float = 3.0  # minimize total_structural_mass_kg
-    w_safety_factor: float = 0.05  # threshold, penalizes only if below safety_factor_min
+    w_mass: float = 2.889  # minimize total_structural_mass_kg
+    w_safety_factor: float = 0.05  # threshold, penalizes only if below safety_factor_min -- not normalized (see NormalizationConstants docstring)
     safety_factor_min: float = 1.5
 
     # Stability. static_margin now uses a real (though assumption-heavy)
@@ -66,7 +71,22 @@ class ObjectiveWeights:
     cm0_min: float = -0.02
 
     # Payload / geometry (maximize)
-    w_payload_volume: float = 1000.0  # payload_volume_margin_m3 is O(1e-3 m^3); scaled to be comparable to the L/D terms
+    w_payload_volume: float = 5.727  # payload_volume_margin_m3, normalized (see above)
+
+    # Soaring performance at the cruise trim condition (cheap proxies, see
+    # objective/metrics.py -- NOT the more precise best-glide-alpha sweep in
+    # objective/performance.py). Disabled (weight 0) by default -- enable
+    # deliberately.
+    w_soaring_power: float = 0.0  # minimize soaring_power_w (power dissipated while gliding -- lower means it stays aloft in weaker lift)
+    w_flight_angle: float = 0.0  # minimize cruise_glide_angle_deg (shallower glide)
+
+    # Roll (lateral) stability -- "dihedral effect" (see objective/metrics.py
+    # and analysis/aero_3d.py). cruise_Clb_per_rad is negative for a roll-
+    # stable design, so this term is scored on -Clb (a "the more, the
+    # better" quantity, same maximize pattern as cruise_L_over_D) -- more
+    # negative Clb increases the score, a positive (roll-unstable) Clb
+    # decreases it. Disabled (weight 0) by default -- enable deliberately.
+    w_roll_stability: float = 0.0
 
     # Hard geometric constraints (fuselage fit, thickness/chord/twist
     # monotonicity, min thickness/spar depth, LE curvature)
@@ -79,6 +99,12 @@ class ObjectiveWeights:
             data = yaml.safe_load(f) or {}
         if "static_margin_target" in data:
             data["static_margin_target"] = tuple(data["static_margin_target"])
+        # A null entry (e.g. from a hand-edited file, or a GUI number input
+        # that silently emptied out -- see gui/config_tab.py's save
+        # callbacks for the primary fix) would otherwise construct a field
+        # as None and crash score() far away from the actual cause; drop it
+        # instead so the field falls back to its dataclass default.
+        data = {k: v for k, v in data.items() if v is not None}
         return cls(**data)
 
     def to_yaml(self, path: str | Path) -> None:
@@ -86,6 +112,53 @@ class ObjectiveWeights:
         data["static_margin_target"] = list(data["static_margin_target"])
         with open(path, "w") as f:
             yaml.safe_dump(data, f, sort_keys=False)
+
+
+@dataclass
+class NormalizationConstants:
+    """Reference scale for each "maximize"/"minimize" objective term (the
+    "threshold"/"target range" terms -- safety_factor, static_margin, cm0 --
+    already compare against a physically meaningful threshold in native
+    units, so a design at the threshold scores exactly 0 there regardless of
+    units; normalizing them "to 1 at the default design" doesn't fit the
+    same pattern and isn't done here).
+
+    Without this, a term's importance is mostly determined by its raw
+    physical magnitude rather than its weight -- e.g. payload volume margin
+    is O(1e-3 m^3) while L/D is O(10), so before this existed
+    w_payload_volume had to be ~1000x w_cruise_L_over_D just to be visible
+    at all, and that scale factor was entangled with (and hid) the actual
+    relative importance the weights were supposed to express.
+
+    Each metric is divided by its normalization constant before being
+    weighted -- the defaults below are that metric's own value computed for
+    this project's default baseline design (`geometry.params.
+    default_design_parameters()`), so for that design every normalized term
+    evaluates to ~1.0 and the weight alone sets its contribution to the
+    score. Regenerate them (e.g. via evaluate_design on a new baseline) if
+    the baseline design changes materially.
+    """
+
+    norm_cruise_L_over_D: float = 7.558
+    norm_fast_L_over_D: float = 9.591
+    norm_root_cl_max: float = 1.381
+    norm_mass: float = 0.963
+    norm_payload_volume: float = 0.005727
+    norm_soaring_power: float = 33.84
+    norm_flight_angle: float = 7.537
+    norm_roll_stability: float = 0.126  # magnitude of cruise_Clb_per_rad for the default baseline (see score() -- the term is scored on -Clb, so this stays positive like the other norm_* constants)
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "NormalizationConstants":
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        # See ObjectiveWeights.from_yaml -- same null-entry guard.
+        data = {k: v for k, v in data.items() if v is not None}
+        return cls(**data)
+
+    def to_yaml(self, path: str | Path) -> None:
+        with open(path, "w") as f:
+            yaml.safe_dump(asdict(self), f, sort_keys=False)
 
 
 @dataclass
@@ -112,15 +185,18 @@ def _constraint_penalty(metrics: DesignMetrics) -> float:
     return penalty
 
 
-def score(metrics: DesignMetrics, weights: ObjectiveWeights = None) -> ObjectiveResult:
+def score(
+    metrics: DesignMetrics, weights: ObjectiveWeights = None, normalization: NormalizationConstants = None,
+) -> ObjectiveResult:
     weights = weights or ObjectiveWeights()
+    n = normalization or NormalizationConstants()
     c: dict[str, float] = {}
 
-    c["cruise_L_over_D"] = weights.w_cruise_L_over_D * metrics.cruise_L_over_D
-    c["fast_L_over_D"] = weights.w_fast_L_over_D * metrics.fast_L_over_D
-    c["root_cl_max"] = weights.w_root_cl_max * metrics.root_cl_max
+    c["cruise_L_over_D"] = weights.w_cruise_L_over_D * metrics.cruise_L_over_D / n.norm_cruise_L_over_D
+    c["fast_L_over_D"] = weights.w_fast_L_over_D * metrics.fast_L_over_D / n.norm_fast_L_over_D
+    c["root_cl_max"] = weights.w_root_cl_max * metrics.root_cl_max / n.norm_root_cl_max
 
-    c["mass"] = -weights.w_mass * metrics.total_structural_mass_kg
+    c["mass"] = -weights.w_mass * metrics.total_structural_mass_kg / n.norm_mass
     c["safety_factor"] = -weights.w_safety_factor * max(0.0, weights.safety_factor_min - metrics.min_safety_factor) ** 2
 
     lo, hi = weights.static_margin_target
@@ -129,7 +205,20 @@ def score(metrics: DesignMetrics, weights: ObjectiveWeights = None) -> Objective
 
     c["cm0"] = -weights.w_cm0 * max(0.0, weights.cm0_min - metrics.root_cm_zero_lift) ** 2
 
-    c["payload_volume"] = weights.w_payload_volume * metrics.payload_volume_margin_m3
+    c["payload_volume"] = weights.w_payload_volume * metrics.payload_volume_margin_m3 / n.norm_payload_volume
+
+    # soaring_power_w/cruise_glide_angle_deg can be NaN for a pathological
+    # (near-zero-or-negative-L/D) candidate -- guard the weight==0 default so
+    # an occasional undefined value on an otherwise-irrelevant term doesn't
+    # poison every score with NaN.
+    c["soaring_power"] = 0.0 if weights.w_soaring_power == 0 else -weights.w_soaring_power * metrics.soaring_power_w / n.norm_soaring_power
+    c["flight_angle"] = 0.0 if weights.w_flight_angle == 0 else -weights.w_flight_angle * metrics.cruise_glide_angle_deg / n.norm_flight_angle
+
+    # Scored on -Clb (positive = roll-stable), so this is a "maximize"-style
+    # term like cruise_L_over_D, not a "minimize" one like mass -- see
+    # ObjectiveWeights.w_roll_stability. Same NaN guard as soaring_power/
+    # flight_angle above.
+    c["roll_stability"] = 0.0 if weights.w_roll_stability == 0 else weights.w_roll_stability * (-metrics.cruise_Clb_per_rad) / n.norm_roll_stability
 
     c["constraint_penalty"] = -weights.constraint_penalty_scale * _constraint_penalty(metrics)
 

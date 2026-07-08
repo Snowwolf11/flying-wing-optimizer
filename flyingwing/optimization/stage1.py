@@ -3,7 +3,7 @@ scale at each control station), planform held fixed at the baseline.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -12,7 +12,7 @@ from ..config import BOUNDS_OVERRIDES_YAML
 from ..geometry.params import DesignParameters
 from ..geometry.airfoil_family import MIN_THICKNESS_RATIO, MAX_THICKNESS_RATIO, max_thickness_ratio
 from ..objective.metrics import evaluate_design
-from ..objective.objective import ObjectiveWeights, score
+from ..objective.objective import ObjectiveWeights, NormalizationConstants, score
 from .base import EvaluatedCandidate, OptimizationResult
 from .vector import ParameterSet, Var, resolve_per_station_bounds
 from .hierarchical import HierarchicalGridSearch, ProgressCallback
@@ -65,11 +65,12 @@ class Stage1Objective:
 
     parameter_set: ParameterSet
     weights: ObjectiveWeights
+    normalization: NormalizationConstants = field(default_factory=NormalizationConstants)
 
     def __call__(self, x: np.ndarray) -> EvaluatedCandidate:
         params = self.parameter_set.build(x)
         metrics = evaluate_design(params)
-        result = score(metrics, self.weights)
+        result = score(metrics, self.weights, self.normalization)
         return EvaluatedCandidate(
             x=np.asarray(x, dtype=float), score=result.score, valid=metrics.valid,
             extra={"contributions": result.contributions, "metrics": metrics},
@@ -79,16 +80,18 @@ class Stage1Objective:
 def run_stage1(
     baseline: DesignParameters,
     weights: ObjectiveWeights | None = None,
+    normalization: NormalizationConstants | None = None,
     optimizer: HierarchicalGridSearch | None = None,
     progress_cb: ProgressCallback | None = None,
 ) -> tuple[OptimizationResult, DesignParameters]:
     """Optimize the airfoil schedule; returns the optimization result plus
     the resulting full DesignParameters (planform unchanged from baseline)."""
     weights = weights or ObjectiveWeights()
+    normalization = normalization or NormalizationConstants()
     optimizer = optimizer or HierarchicalGridSearch()
 
     parameter_set = make_stage1_parameter_set(baseline)
-    objective_fn = Stage1Objective(parameter_set, weights)
+    objective_fn = Stage1Objective(parameter_set, weights, normalization)
 
     result = optimizer.optimize(objective_fn, parameter_set.bounds, x0=parameter_set.default_vector, progress_cb=progress_cb)
     best_params = parameter_set.build(result.best_x)

@@ -25,11 +25,21 @@ from ..config import (
 
 SHELL_AREAL_DENSITY_KG_M2 = 0.55  # foam-core + glass/film skin, both surfaces combined per unit planform area
 SPAR_MATERIAL_DENSITY_KG_M3 = 1600.0  # generic glass/carbon spar-cap laminate
-FIXED_EQUIPMENT_MASS_KG = 0.45  # motor, ESC, servos, receiver, FC, wiring allowance
+
+# Realistic high-quality-component masses for a rear-mounted-pusher FPV
+# flying wing in the ~1.4-1.8 m class (replaces one lump "fixed equipment"
+# mass split by tunable fractions -- each component now has its own
+# independently-set, realistic default):
+MOTOR_ESC_MASS_KG = 0.10  # quality ~2807-3110-size outrunner + 40-60A ESC
+AVIONICS_MASS_KG = 0.03  # FC + receiver + wiring, no separate ESC (bundled above)
+SERVO_MASS_KG = 0.03  # 2x quality digital metal-gear elevon servos
 
 _ov.apply_overrides(
     globals(), BOUNDS_OVERRIDES_YAML,
-    {"SHELL_AREAL_DENSITY_KG_M2", "SPAR_MATERIAL_DENSITY_KG_M3", "FIXED_EQUIPMENT_MASS_KG"},
+    {
+        "SHELL_AREAL_DENSITY_KG_M2", "SPAR_MATERIAL_DENSITY_KG_M3",
+        "MOTOR_ESC_MASS_KG", "AVIONICS_MASS_KG", "SERVO_MASS_KG",
+    },
 )
 
 REQUIRED_FUSELAGE_BOX_VOLUME_M3 = (
@@ -41,8 +51,14 @@ REQUIRED_FUSELAGE_BOX_VOLUME_M3 = (
 class MassEstimate:
     shell_mass_kg: float
     spar_mass_kg: float
-    fixed_equipment_mass_kg: float
-    total_structural_mass_kg: float  # shell + spar + fixed equipment; excludes battery/payload mass
+    motor_esc_mass_kg: float
+    avionics_mass_kg: float
+    servo_mass_kg: float
+    total_structural_mass_kg: float  # shell + spar + motor/ESC + avionics + servos; excludes battery/payload mass
+
+    @property
+    def fixed_equipment_mass_kg(self) -> float:
+        return self.motor_esc_mass_kg + self.avionics_mass_kg + self.servo_mass_kg
 
     fuselage_internal_volume_m3: float
     payload_volume_margin_m3: float  # fuselage internal volume beyond the minimum required box
@@ -66,7 +82,9 @@ def estimate_mass(aircraft: Aircraft, structures: StructuralProxyResult) -> Mass
     one_side_spar_volume = np.trapezoid(structures.spar_material_area_m2, structures.span_station_m)
     spar_mass_kg = 2.0 * one_side_spar_volume * SPAR_MATERIAL_DENSITY_KG_M3
 
-    total_structural_mass_kg = shell_mass_kg + spar_mass_kg + FIXED_EQUIPMENT_MASS_KG
+    total_structural_mass_kg = (
+        shell_mass_kg + spar_mass_kg + MOTOR_ESC_MASS_KG + AVIONICS_MASS_KG + SERVO_MASS_KG
+    )
 
     fuselage_volume = _fuselage_internal_volume_m3(aircraft)
     payload_volume_margin_m3 = fuselage_volume - REQUIRED_FUSELAGE_BOX_VOLUME_M3
@@ -74,7 +92,9 @@ def estimate_mass(aircraft: Aircraft, structures: StructuralProxyResult) -> Mass
     return MassEstimate(
         shell_mass_kg=shell_mass_kg,
         spar_mass_kg=spar_mass_kg,
-        fixed_equipment_mass_kg=FIXED_EQUIPMENT_MASS_KG,
+        motor_esc_mass_kg=MOTOR_ESC_MASS_KG,
+        avionics_mass_kg=AVIONICS_MASS_KG,
+        servo_mass_kg=SERVO_MASS_KG,
         total_structural_mass_kg=total_structural_mass_kg,
         fuselage_internal_volume_m3=fuselage_volume,
         payload_volume_margin_m3=payload_volume_margin_m3,

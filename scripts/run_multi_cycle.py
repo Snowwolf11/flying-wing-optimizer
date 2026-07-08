@@ -16,11 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from flyingwing.geometry.params import default_design_parameters
-from flyingwing.geometry.params_io import load_design_parameters
+from flyingwing.geometry.params_io import load_default_design_parameters, load_design_parameters
 from flyingwing.geometry.aircraft import build_aircraft
 from flyingwing.objective.metrics import evaluate_design
-from flyingwing.objective.objective import score, ObjectiveWeights
+from flyingwing.objective.objective import score, ObjectiveWeights, NormalizationConstants
 from flyingwing.objective.performance import estimate_performance
 from flyingwing.optimization.hierarchical import HierarchicalGridSearch
 from flyingwing.optimization.cycle import run_multi_cycle
@@ -44,6 +43,7 @@ def parse_args():
     p.add_argument("--n-jobs", type=int, default=4)
     p.add_argument("--output-dir-name", type=str, default="multi_cycle_run")
     p.add_argument("--weights-yaml", type=str, default=None)
+    p.add_argument("--normalization-yaml", type=str, default=None)
     p.add_argument("--baseline-yaml", type=str, default=None)
     return p.parse_args()
 
@@ -55,6 +55,13 @@ def _load_weights(weights_yaml: str | None) -> ObjectiveWeights:
     return ObjectiveWeights()
 
 
+def _load_normalization(normalization_yaml: str | None) -> NormalizationConstants:
+    path = Path(normalization_yaml) if normalization_yaml else Path("configs/normalization.yaml")
+    if path.exists():
+        return NormalizationConstants.from_yaml(path)
+    return NormalizationConstants()
+
+
 def _print_progress(info: dict) -> None:
     """One machine-parseable line per optimizer stage, for the GUI's Run tab
     to poll and render as a progress readout (see gui/run_manager.py)."""
@@ -64,11 +71,12 @@ def _print_progress(info: dict) -> None:
 def main():
     args = parse_args()
 
-    baseline = load_design_parameters(args.baseline_yaml) if args.baseline_yaml else default_design_parameters()
+    baseline = load_design_parameters(args.baseline_yaml) if args.baseline_yaml else load_default_design_parameters()
     weights = _load_weights(args.weights_yaml)
+    normalization = _load_normalization(args.normalization_yaml)
 
     baseline_metrics = evaluate_design(baseline)
-    baseline_score = score(baseline_metrics, weights)
+    baseline_score = score(baseline_metrics, weights, normalization)
 
     stage1_optimizer = HierarchicalGridSearch(
         n_stages=args.stage1_n_stages, n_samples_per_stage=args.stage1_n_samples_per_stage,
@@ -81,7 +89,7 @@ def main():
 
     print("Running multi-cycle Stage1<->Stage2 optimization...", flush=True)
     mc = run_multi_cycle(
-        baseline, n_cycles=args.n_cycles, weights=weights,
+        baseline, n_cycles=args.n_cycles, weights=weights, normalization=normalization,
         stage1_optimizer=stage1_optimizer, stage2_optimizer=stage2_optimizer,
         start_with=args.start_with, convergence_tol=args.convergence_tol,
         progress_cb=_print_progress,
@@ -99,6 +107,7 @@ def main():
         "span_m", "aspect_ratio", "wing_area_m2",
         "cruise_L_over_D", "fast_L_over_D", "root_cl_max", "min_safety_factor",
         "total_structural_mass_kg", "payload_volume_margin_m3", "static_margin",
+        "soaring_power_w", "cruise_glide_angle_deg", "cruise_Clb_per_rad",
     ]:
         b = getattr(baseline_metrics, field)
         o = getattr(best_metrics, field)

@@ -19,14 +19,17 @@ import flyingwing.objective.mass as mass
 import flyingwing.objective.cg as cg
 import flyingwing.objective.performance as performance
 import flyingwing.optimization.stage1 as stage1_module
-from ..objective.objective import ObjectiveWeights
+from ..objective.objective import ObjectiveWeights, NormalizationConstants
 from ..optimization.vector import resolve_per_station_bounds
 from ..geometry.params import DEFAULT_PLANFORM_Y_CONTROL, DEFAULT_AIRFOIL_Y_CONTROL
+from .numeric import parse_number
 
 WEIGHTS_YAML = "configs/objective_weights.yaml"
+NORMALIZATION_YAML = "configs/normalization.yaml"
 BOUNDS_YAML = "configs/bounds_overrides.yaml"
 
 _N_PLANFORM_STATIONS = len(DEFAULT_PLANFORM_Y_CONTROL)
+_N_PLANFORM_SEGMENTS = _N_PLANFORM_STATIONS - 1
 _N_AIRFOIL_STATIONS = len(DEFAULT_AIRFOIL_Y_CONTROL)
 
 # (attribute name, display label, step) -- generated programmatically so the
@@ -43,10 +46,27 @@ _WEIGHT_SCALARS = [
     ("w_cm0", "Root Cm0 weight", 0.1),
     ("cm0_min", "Root Cm0 threshold", 0.01),
     ("w_payload_volume", "Payload volume weight", 10.0),
+    ("w_soaring_power", "Soaring power weight", 0.1),
+    ("w_flight_angle", "Flight angle weight", 0.1),
+    ("w_roll_stability", "Roll stability weight", 0.1),
     ("invalid_penalty", "Invalid-design flat penalty", 10.0),
     ("constraint_penalty_scale", "Constraint penalty scale", 10.0),
 ]
 _WEIGHT_RANGE = ("static_margin_target", "Static margin target range")
+
+# Each objective term is divided by its matching normalization constant
+# before being weighted (objective/objective.py::score) -- defaults are that
+# metric's own value for the default baseline design.
+_NORMALIZATION_SCALARS = [
+    ("norm_cruise_L_over_D", "Cruise L/D normalization", 0.1),
+    ("norm_fast_L_over_D", "Fast L/D normalization", 0.1),
+    ("norm_root_cl_max", "Root CLmax normalization", 0.01),
+    ("norm_mass", "Mass normalization (kg)", 0.01),
+    ("norm_payload_volume", "Payload volume normalization (m^3)", 0.0001),
+    ("norm_soaring_power", "Soaring power normalization (W)", 0.1),
+    ("norm_flight_angle", "Flight angle normalization (deg)", 0.1),
+    ("norm_roll_stability", "Roll stability normalization (Clb/rad)", 0.01),
+]
 
 _CONFIG_SCALARS = [
     ("DESIGN_LOAD_FACTOR_G", "Design load factor (g)", 0.5),
@@ -58,10 +78,6 @@ _CONFIG_SCALARS = [
     ("MIN_SPAR_DEPTH_M", "Min spar depth (m)", 0.0005),
     ("MAX_LE_CURVATURE_PER_M", "Max LE curvature (1/m)", 5.0),
     ("MAX_Z_CURVATURE_PER_M", "Max vertical (winglet) curvature (1/m)", 5.0),
-    ("Z_OFFSET_TIP_SEGMENT_Y_THRESHOLD", "Winglet region start (y, normalized span)", 0.05),
-    ("Z_OFFSET_TIP_MIN_M", "Winglet region min Z offset (m)", 0.01),
-    ("MAX_LE_OFFSET_SLOPE_M_PER_SPAN", "Max LE offset slope (m/span, advanced)", 0.1),
-    ("MAX_Z_OFFSET_SLOPE_M_PER_SPAN", "Max Z offset slope (m/span, advanced)", 0.1),
     ("FUSELAGE_MIN_INTERNAL_WIDTH_M", "Fuselage min width (m)", 0.005),
     ("FUSELAGE_MIN_INTERNAL_HEIGHT_M", "Fuselage min height (m)", 0.005),
     ("FUSELAGE_MIN_INTERNAL_LENGTH_M", "Fuselage min length (m)", 0.01),
@@ -71,19 +87,12 @@ _CONFIG_SCALARS = [
 _MASS_SCALARS = [
     ("SHELL_AREAL_DENSITY_KG_M2", "Shell areal density (kg/m^2)", 0.01),
     ("SPAR_MATERIAL_DENSITY_KG_M3", "Spar material density (kg/m^3)", 10.0),
-    ("FIXED_EQUIPMENT_MASS_KG", "Fixed equipment mass (kg)", 0.01),
+    ("MOTOR_ESC_MASS_KG", "Motor/ESC mass (kg)", 0.005),
+    ("AVIONICS_MASS_KG", "Avionics mass (kg)", 0.005),
+    ("SERVO_MASS_KG", "Servo mass (kg)", 0.005),
 ]
 _CG_SCALARS = [
-    ("MOTOR_ESC_MASS_FRACTION", "Motor/ESC mass fraction (of fixed equipment)", 0.01),
-    ("AVIONICS_MASS_FRACTION", "Avionics mass fraction (of fixed equipment)", 0.01),
-    ("SERVO_MASS_FRACTION", "Servo mass fraction (of fixed equipment)", 0.01),
-    ("MOTOR_ESC_X_FRACTION_CHORD", "Motor/ESC x-position (fraction root chord)", 0.01),
-    ("AVIONICS_X_FRACTION_CHORD", "Avionics x-position (fraction root chord)", 0.01),
-    ("SERVO_X_FRACTION_CHORD", "Servo x-position (fraction root chord)", 0.01),
-    ("SHELL_CENTROID_X_FRACTION_CHORD", "Shell centroid x (fraction local chord)", 0.01),
-    ("SPAR_X_FRACTION_CHORD", "Spar x-position (fraction local chord)", 0.01),
     ("BATTERY_MASS_KG", "Battery mass (kg)", 0.01),
-    ("BATTERY_X_FRACTION_CHORD", "Battery assumed x-position (fraction root chord)", 0.01),
 ]
 _PERFORMANCE_SCALARS = [
     ("BATTERY_CAPACITY_MAH", "Battery capacity (mAh)", 50.0),
@@ -93,6 +102,8 @@ _PERFORMANCE_SCALARS = [
 ]
 _CONFIG_BOUNDS = [
     ("SWEEP_DEG_BOUNDS", "Sweep (deg)", 0.5),
+    ("LE_OFFSET_ROOT_M_BOUNDS", "LE offset root (m)", 0.005),
+    ("Z_OFFSET_ROOT_M_BOUNDS", "Z offset root (m)", 0.005),
 ]
 
 # Bounds editable per control-point/station rather than as one uniform
@@ -100,19 +111,24 @@ _CONFIG_BOUNDS = [
 # sized to the built-in default baseline's station count. (If a Design-tab
 # baseline with a *different* station count is used to launch a run,
 # vector.resolve_per_station_bounds raises a clear error rather than
-# silently misapplying bounds -- see its docstring.) The planform ones are
-# bounds on the actual value at each station (chord in m, twist in deg, LE
-# offset in m, Z offset in m) -- optimization/stage2.py translates these
-# into the underlying decrement/slope search variables that keep chord/
-# twist monotonic and LE/Z offset curvature-bounded by construction.
+# silently misapplying bounds -- see its docstring.) Chord/twist are bounds
+# on the actual value at each of the n stations; LE/Z offset slope are
+# bounds on the slope of each of the n-1 segments *between* consecutive
+# stations (m of offset per unit of normalized span y) -- optimization/
+# stage2.py builds chord/twist as a root value + non-negative per-segment
+# deltas (keeping them monotonic by construction) and LE/Z offset as a root
+# value (see _CONFIG_BOUNDS above) + a per-segment slope bounded directly
+# here (keeping curvature bounded by construction, without an extra global
+# slope cap or special-cased "winglet region" -- each segment, including
+# ones spanning the wingtip, is fully independently controllable).
 _PER_STATION_BOUNDS = [
     ("THICKNESS_SCALE_BOUNDS", "Thickness scale", 0.01, stage1_module, _N_AIRFOIL_STATIONS),
     ("CAMBER_SCALE_BOUNDS", "Camber scale", 0.01, stage1_module, _N_AIRFOIL_STATIONS),
     ("REFLEX_SCALE_BOUNDS", "Reflex scale", 0.01, stage1_module, _N_AIRFOIL_STATIONS),
     ("CHORD_STATION_M_BOUNDS", "Chord (m)", 0.005, config, _N_PLANFORM_STATIONS),
     ("TWIST_STATION_DEG_BOUNDS", "Twist (deg)", 0.1, config, _N_PLANFORM_STATIONS),
-    ("LE_OFFSET_STATION_M_BOUNDS", "LE offset (m)", 0.005, config, _N_PLANFORM_STATIONS),
-    ("Z_OFFSET_STATION_M_BOUNDS", "Z offset (m)", 0.005, config, _N_PLANFORM_STATIONS),
+    ("LE_OFFSET_SLOPE_M_PER_SPAN_BOUNDS", "LE offset slope (m/span, per y-section)", 0.05, config, _N_PLANFORM_SEGMENTS),
+    ("Z_OFFSET_SLOPE_M_PER_SPAN_BOUNDS", "Z offset slope (m/span, per y-section)", 0.05, config, _N_PLANFORM_SEGMENTS),
 ]
 
 _INPUT_STYLE = {"width": "100%", "fontSize": "12px", "boxSizing": "border-box"}
@@ -128,7 +144,10 @@ _TH_STYLE = {"padding": "1px 5px", "textAlign": "left", "fontSize": "11px", "col
 def _scalar_cell(id_prefix: str, name: str, label: str, value: float, step: float) -> html.Div:
     return html.Div([
         html.Label(label, style=_GRID_LABEL_STYLE),
-        dcc.Input(id=f"{id_prefix}-{name}", type="number", value=value, step=step, style=_INPUT_STYLE),
+        # type="text", not "number" -- see gui/numeric.py's module docstring
+        # for why (native number inputs silently reject one of '.'/',' on a
+        # non-US locale, with no way to detect or fix that from Python).
+        dcc.Input(id=f"{id_prefix}-{name}", type="text", inputMode="decimal", value=value, style=_INPUT_STYLE),
     ])
 
 
@@ -143,8 +162,8 @@ def _bounds_row(id_prefix: str, name: str, label: str, lo: float, hi: float, ste
     return html.Div([
         html.Label(label, style=_GRID_LABEL_STYLE),
         html.Div([
-            dcc.Input(id=f"{id_prefix}-{name}-lo", type="number", value=lo, step=step, style={**_INPUT_STYLE, "width": "70px", "marginRight": "4px"}),
-            dcc.Input(id=f"{id_prefix}-{name}-hi", type="number", value=hi, step=step, style={**_INPUT_STYLE, "width": "70px"}),
+            dcc.Input(id=f"{id_prefix}-{name}-lo", type="text", inputMode="decimal", value=lo, style={**_INPUT_STYLE, "width": "70px", "marginRight": "4px"}),
+            dcc.Input(id=f"{id_prefix}-{name}-hi", type="text", inputMode="decimal", value=hi, style={**_INPUT_STYLE, "width": "70px"}),
         ], style={"display": "flex"}),
     ])
 
@@ -157,11 +176,11 @@ def _per_station_bound_table(id_prefix: str, name: str, label: str, module, n: i
     header = html.Tr([html.Th("", style=_TH_STYLE)] + [html.Th(f"st.{i}", style=_TH_STYLE) for i in range(n)])
     lo_row = html.Tr(
         [html.Th("lo", style=_TH_STYLE)]
-        + [html.Td(dcc.Input(id=f"{id_prefix}-{name}-lo-{i}", type="number", value=lo, step=step, style=_TABLE_INPUT_STYLE), style=_TD_STYLE) for i, (lo, hi) in enumerate(pairs)]
+        + [html.Td(dcc.Input(id=f"{id_prefix}-{name}-lo-{i}", type="text", inputMode="decimal", value=lo, style=_TABLE_INPUT_STYLE), style=_TD_STYLE) for i, (lo, hi) in enumerate(pairs)]
     )
     hi_row = html.Tr(
         [html.Th("hi", style=_TH_STYLE)]
-        + [html.Td(dcc.Input(id=f"{id_prefix}-{name}-hi-{i}", type="number", value=hi, step=step, style=_TABLE_INPUT_STYLE), style=_TD_STYLE) for i, (lo, hi) in enumerate(pairs)]
+        + [html.Td(dcc.Input(id=f"{id_prefix}-{name}-hi-{i}", type="text", inputMode="decimal", value=hi, style=_TABLE_INPUT_STYLE), style=_TD_STYLE) for i, (lo, hi) in enumerate(pairs)]
     )
     table = html.Table(html.Tbody([header, lo_row, hi_row]), style={"borderCollapse": "collapse"})
     return html.Details(
@@ -181,8 +200,30 @@ def _load_current_weights() -> ObjectiveWeights:
         return ObjectiveWeights()
 
 
+def _load_current_normalization() -> NormalizationConstants:
+    try:
+        return NormalizationConstants.from_yaml(NORMALIZATION_YAML)
+    except FileNotFoundError:
+        return NormalizationConstants()
+
+
+def _first_invalid_label(labeled_values: list[tuple[str, object]]) -> str | None:
+    """Label of the first None/non-numeric value (post gui.numeric.parse_number),
+    or None if every value is a real number -- callers should parse_number()
+    every raw dcc.Input value before calling this. Without this check, a
+    left-empty or unparseable field gets written straight to YAML as `null`
+    (with a false "Saved" message) and only surfaces later as a score()
+    crash far from the actual cause -- see objective/objective.py's
+    from_yaml for the complementary read-side guard."""
+    for label, value in labeled_values:
+        if not isinstance(value, (int, float)):
+            return label
+    return None
+
+
 def layout() -> html.Div:
     w = _load_current_weights()
+    n = _load_current_normalization()
     lo, hi = w.static_margin_target
 
     weights_section = _section("Objective weights", [
@@ -190,6 +231,20 @@ def layout() -> html.Div:
         _bounds_row("weight", _WEIGHT_RANGE[0], _WEIGHT_RANGE[1], lo, hi, 0.01),
         html.Button("Save Weights", id="save-weights-button", n_clicks=0, style={"marginTop": "8px"}),
         html.Div(id="save-weights-status", style={"marginTop": "4px", "fontFamily": "monospace", "fontSize": "12px"}),
+    ])
+
+    normalization_section = _section("Normalization constants", [
+        html.P(
+            "Every objective term above is divided by its normalization constant before being "
+            "weighted, so a weight expresses relative importance rather than being entangled with "
+            "the metric's raw physical magnitude (e.g. payload volume in m^3 vs. L/D as a ratio "
+            "~10-30). Defaults are each metric's own value for the default baseline design, so for "
+            "that design every normalized term is ~1.0.",
+            style={"fontStyle": "italic", "color": "#666", "fontSize": "12px"},
+        ),
+        _scalar_grid("norm", _NORMALIZATION_SCALARS, lambda name: getattr(n, name)),
+        html.Button("Save Normalization", id="save-normalization-button", n_clicks=0, style={"marginTop": "8px"}),
+        html.Div(id="save-normalization-status", style={"marginTop": "4px", "fontFamily": "monospace", "fontSize": "12px"}),
     ])
 
     structural_section = _section("Structural / mass / CG / performance constants", [
@@ -218,6 +273,7 @@ def layout() -> html.Div:
                 style={"fontStyle": "italic", "color": "#666", "fontSize": "13px"},
             ),
             weights_section,
+            normalization_section,
             structural_section,
             bounds_section,
             html.Button("Save Bounds", id="save-bounds-button", n_clicks=0, style={"marginTop": "6px"}),
@@ -237,14 +293,39 @@ def register_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def save_weights(n_clicks, *values):
+        values = [parse_number(v) for v in values]
         scalar_values = values[: len(_WEIGHT_SCALARS)]
         lo, hi = values[len(_WEIGHT_SCALARS):]
+
+        labeled = [(label, v) for (_, label, _), v in zip(_WEIGHT_SCALARS, scalar_values)]
+        labeled += [(f"{_WEIGHT_RANGE[1]} (lo)", lo), (f"{_WEIGHT_RANGE[1]} (hi)", hi)]
+        bad = _first_invalid_label(labeled)
+        if bad is not None:
+            return f"NOT saved -- '{bad}' is empty or not a number."
 
         kwargs = {name: v for (name, _, _), v in zip(_WEIGHT_SCALARS, scalar_values)}
         kwargs["static_margin_target"] = (lo, hi)
         weights = ObjectiveWeights(**kwargs)
         weights.to_yaml(WEIGHTS_YAML)
         return f"Saved to {WEIGHTS_YAML}"
+
+    @app.callback(
+        Output("save-normalization-status", "children"),
+        Input("save-normalization-button", "n_clicks"),
+        [State(f"norm-{name}", "value") for name, _, _ in _NORMALIZATION_SCALARS],
+        prevent_initial_call=True,
+    )
+    def save_normalization(n_clicks, *values):
+        values = [parse_number(v) for v in values]
+        labeled = [(label, v) for (_, label, _), v in zip(_NORMALIZATION_SCALARS, values)]
+        bad = _first_invalid_label(labeled)
+        if bad is not None:
+            return f"NOT saved -- '{bad}' is empty or not a number."
+
+        kwargs = {name: v for (name, _, _), v in zip(_NORMALIZATION_SCALARS, values)}
+        normalization = NormalizationConstants(**kwargs)
+        normalization.to_yaml(NORMALIZATION_YAML)
+        return f"Saved to {NORMALIZATION_YAML}"
 
     @app.callback(
         Output("save-bounds-status", "children"),
@@ -263,25 +344,33 @@ def register_callbacks(app: dash.Dash) -> None:
         prevent_initial_call=True,
     )
     def save_bounds(n_clicks, *values):
+        values = [parse_number(v) for v in values]
         i = 0
         data = {}
-        for name, _, _ in _CONFIG_SCALARS:
-            data[name] = values[i]; i += 1
-        for name, _, _ in _MASS_SCALARS:
-            data[name] = values[i]; i += 1
-        for name, _, _ in _CG_SCALARS:
-            data[name] = values[i]; i += 1
-        for name, _, _ in _PERFORMANCE_SCALARS:
-            data[name] = values[i]; i += 1
-        for name, _, _ in _CONFIG_BOUNDS:
+        labeled = []
+        for name, label, _ in _CONFIG_SCALARS:
+            labeled.append((label, values[i])); data[name] = values[i]; i += 1
+        for name, label, _ in _MASS_SCALARS:
+            labeled.append((label, values[i])); data[name] = values[i]; i += 1
+        for name, label, _ in _CG_SCALARS:
+            labeled.append((label, values[i])); data[name] = values[i]; i += 1
+        for name, label, _ in _PERFORMANCE_SCALARS:
+            labeled.append((label, values[i])); data[name] = values[i]; i += 1
+        for name, label, _ in _CONFIG_BOUNDS:
             lo, hi = values[i], values[i + 1]; i += 2
+            labeled.append((f"{label} (lo)", lo)); labeled.append((f"{label} (hi)", hi))
             data[name] = [lo, hi]
-        for name, _, _, _, n in _PER_STATION_BOUNDS:
+        for name, label, _, _, n in _PER_STATION_BOUNDS:
             pairs = []
-            for _station in range(n):
+            for station in range(n):
                 lo, hi = values[i], values[i + 1]; i += 2
+                labeled.append((f"{label} st.{station} (lo)", lo)); labeled.append((f"{label} st.{station} (hi)", hi))
                 pairs.append([lo, hi])
             data[name] = pairs
+
+        bad = _first_invalid_label(labeled)
+        if bad is not None:
+            return f"NOT saved -- '{bad}' is empty or not a number."
 
         import yaml
         with open(BOUNDS_YAML, "w") as f:
