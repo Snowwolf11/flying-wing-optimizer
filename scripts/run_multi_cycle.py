@@ -22,6 +22,7 @@ from flyingwing.objective.metrics import evaluate_design
 from flyingwing.objective.objective import score, ObjectiveWeights, NormalizationConstants
 from flyingwing.objective.performance import estimate_performance
 from flyingwing.optimization.hierarchical import HierarchicalGridSearch
+from flyingwing.optimization.cmaes import CMAESOptimizer
 from flyingwing.optimization.cycle import run_multi_cycle
 from flyingwing.viz.geometry_plots import save_all as save_geometry_plots
 from flyingwing.viz.optimization_plots import plot_multi_cycle_convergence
@@ -30,15 +31,23 @@ from flyingwing.config import OUTPUT_DIR, CRUISE_SPEED_MS
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--optimizer", choices=["cma", "lhs"], default="cma", help="cma = CMA-ES (default), used for both stages. lhs = the original hierarchical Latin Hypercube search, kept as a selectable alternative.")
     p.add_argument("--n-cycles", type=int, default=2)
     p.add_argument("--convergence-tol", type=float, default=None)
     p.add_argument("--start-with", choices=["stage1", "stage2"], default="stage1")
+    # CMA-ES options (optimization/cmaes.py::CMAESOptimizer), shared by both stages
+    p.add_argument("--cma-sigma0", type=float, default=0.25)
+    p.add_argument("--cma-population-size", type=int, default=None, help="None = pycma's own default heuristic")
+    p.add_argument("--cma-max-generations", type=int, default=100)
+    p.add_argument("--cma-n-restarts", type=int, default=2)
+    # LHS options (optimization/hierarchical.py::HierarchicalGridSearch), per-stage
     p.add_argument("--stage1-n-stages", type=int, default=3)
     p.add_argument("--stage1-n-samples-per-stage", type=int, default=24)
     p.add_argument("--stage1-retain-best-n", type=int, default=5)
     p.add_argument("--stage2-n-stages", type=int, default=3)
     p.add_argument("--stage2-n-samples-per-stage", type=int, default=40)
     p.add_argument("--stage2-retain-best-n", type=int, default=6)
+    # Shared
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--n-jobs", type=int, default=4)
     p.add_argument("--output-dir-name", type=str, default="multi_cycle_run")
@@ -46,6 +55,29 @@ def parse_args():
     p.add_argument("--normalization-yaml", type=str, default=None)
     p.add_argument("--baseline-yaml", type=str, default=None)
     return p.parse_args()
+
+
+def _build_optimizers(args):
+    """(stage1_optimizer, stage2_optimizer) -- two separate instances (CMA-ES
+    needs each stage's own dimensionality-derived default population size),
+    same algorithm/hyperparameters for both when using CMA-ES."""
+    if args.optimizer == "lhs":
+        stage1_optimizer = HierarchicalGridSearch(
+            n_stages=args.stage1_n_stages, n_samples_per_stage=args.stage1_n_samples_per_stage,
+            retain_best_n=args.stage1_retain_best_n, seed=args.seed, n_jobs=args.n_jobs,
+        )
+        stage2_optimizer = HierarchicalGridSearch(
+            n_stages=args.stage2_n_stages, n_samples_per_stage=args.stage2_n_samples_per_stage,
+            retain_best_n=args.stage2_retain_best_n, seed=args.seed, n_jobs=args.n_jobs,
+        )
+        return stage1_optimizer, stage2_optimizer
+
+    cma_kwargs = dict(
+        sigma0=args.cma_sigma0, population_size=args.cma_population_size,
+        max_generations=args.cma_max_generations, n_restarts=args.cma_n_restarts,
+        seed=args.seed, n_jobs=args.n_jobs,
+    )
+    return CMAESOptimizer(**cma_kwargs), CMAESOptimizer(**cma_kwargs)
 
 
 def _load_weights(weights_yaml: str | None) -> ObjectiveWeights:
@@ -78,16 +110,9 @@ def main():
     baseline_metrics = evaluate_design(baseline)
     baseline_score = score(baseline_metrics, weights, normalization)
 
-    stage1_optimizer = HierarchicalGridSearch(
-        n_stages=args.stage1_n_stages, n_samples_per_stage=args.stage1_n_samples_per_stage,
-        retain_best_n=args.stage1_retain_best_n, seed=args.seed, n_jobs=args.n_jobs,
-    )
-    stage2_optimizer = HierarchicalGridSearch(
-        n_stages=args.stage2_n_stages, n_samples_per_stage=args.stage2_n_samples_per_stage,
-        retain_best_n=args.stage2_retain_best_n, seed=args.seed, n_jobs=args.n_jobs,
-    )
+    stage1_optimizer, stage2_optimizer = _build_optimizers(args)
 
-    print("Running multi-cycle Stage1<->Stage2 optimization...", flush=True)
+    print(f"Running multi-cycle Stage1<->Stage2 optimization ({args.optimizer})...", flush=True)
     mc = run_multi_cycle(
         baseline, n_cycles=args.n_cycles, weights=weights, normalization=normalization,
         stage1_optimizer=stage1_optimizer, stage2_optimizer=stage2_optimizer,

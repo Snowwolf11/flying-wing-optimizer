@@ -12,6 +12,7 @@ dependencies = [
     "neuralfoil",
     "matplotlib",
     "pyyaml",
+    "cma",
 ]
 
 [build-system]

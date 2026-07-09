@@ -9,6 +9,7 @@ specific algorithm, so swapping the algorithm doesn't touch the drivers.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -49,3 +50,13 @@ class Optimizer(ABC):
         x0: np.ndarray | None = None,
     ) -> OptimizationResult:
         """Maximize `objective_fn` (higher EvaluatedCandidate.score is better) over the given bounds."""
+
+
+def evaluate_batch(objective_fn: ObjectiveFn, candidates: np.ndarray, n_jobs: int = 1) -> list[EvaluatedCandidate]:
+    """Evaluate a batch of candidate vectors, in parallel worker processes if
+    n_jobs > 1. Shared by every batch-oriented Optimizer (hierarchical.py,
+    cmaes.py) so they evaluate a generation/stage's candidates the same way."""
+    if n_jobs <= 1:
+        return [objective_fn(x) for x in candidates]
+    with ProcessPoolExecutor(max_workers=n_jobs) as ex:
+        return list(ex.map(objective_fn, candidates))

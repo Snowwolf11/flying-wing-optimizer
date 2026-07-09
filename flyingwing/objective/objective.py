@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 from .metrics import DesignMetrics
@@ -226,5 +227,18 @@ def score(
     if not metrics.valid:
         total -= weights.invalid_penalty
         c["invalid_penalty"] = -weights.invalid_penalty
+
+    # A NaN can still reach here for a pathological candidate with a nonzero
+    # soaring_power/flight_angle/roll_stability weight (the weight==0 guards
+    # above only cover the *disabled* case) -- e.g. a wildly invalid,
+    # negative-L/D design makes cruise_glide_angle_deg undefined. Left as
+    # NaN, `max(candidates, key=lambda c: c.score)` elsewhere (hierarchical.py,
+    # cmaes.py) has a real footgun: Python's max() never replaces a NaN
+    # "current best" with a later, better real number (`5 > nan` is False),
+    # so a single NaN candidate can silently "win" over every valid one.
+    # -inf sorts as worst-possible instead, which is what a degenerate
+    # candidate should be.
+    if not np.isfinite(total):
+        total = -np.inf
 
     return ObjectiveResult(score=total, contributions=c)

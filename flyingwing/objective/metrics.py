@@ -13,7 +13,7 @@ import numpy as np
 
 from ..geometry.params import DesignParameters
 from ..geometry.aircraft import build_aircraft
-from ..geometry.constraints import check_all_constraints, curve_curvature
+from ..geometry.constraints import check_all_constraints, curve_curvature, quick_reject_reason
 from ..geometry.airfoil_family import generate_airfoil, MIN_THICKNESS_RATIO
 from ..analysis.airfoil_2d import evaluate_section, reynolds_number
 from ..analysis.aero_3d import analyze_aerobuildup
@@ -108,6 +108,18 @@ def evaluate_design(
     fast_speed_ms: float = TOP_SPEED_MS,
     load_factor_g: float = DESIGN_LOAD_FACTOR_G,
 ) -> DesignMetrics:
+    # Cheap pre-check on the raw control points, before paying for
+    # build_aircraft() + AeroBuildup + NeuralFoil (the dominant per-
+    # candidate cost) -- see quick_reject_reason's docstring for why this
+    # is safe (can only reject what the real check below would also
+    # reject). A candidate rejected here just gets a mostly-default
+    # DesignMetrics; score() treats a NaN-heavy invalid metrics object the
+    # same as any other invalid one (see objective/objective.py's
+    # NaN-to-(-inf) guard).
+    reject_reason = quick_reject_reason(params)
+    if reject_reason is not None:
+        return DesignMetrics(valid=False, constraint_violations=[reject_reason])
+
     aircraft = build_aircraft(params)
     constraints = check_all_constraints(aircraft)
 

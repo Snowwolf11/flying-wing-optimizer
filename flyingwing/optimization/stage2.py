@@ -31,6 +31,7 @@ from ..objective.objective import ObjectiveWeights, NormalizationConstants, scor
 from .base import EvaluatedCandidate, OptimizationResult
 from .vector import ParameterSet, Var, resolve_per_station_bounds
 from .hierarchical import HierarchicalGridSearch, ProgressCallback
+from .cmaes import CMAESOptimizer
 from ..config import (
     WINGSPAN_MIN_M, WINGSPAN_MAX_M, SWEEP_DEG_BOUNDS,
     CHORD_STATION_M_BOUNDS, TWIST_STATION_DEG_BOUNDS, LE_OFFSET_ROOT_M_BOUNDS, Z_OFFSET_ROOT_M_BOUNDS,
@@ -56,12 +57,27 @@ def _station_bounds_arrays(y_control: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
-def _cumulative_decrease(root: float, deltas: np.ndarray, floor: np.ndarray) -> np.ndarray:
-    """[root, root-deltas[0], root-deltas[0]-deltas[1], ...], floored --
-    monotonically non-increasing by construction since deltas >= 0. `floor`
-    may be a scalar or a per-station array."""
+def _cumulative_decrease(root: float, deltas: np.ndarray, floor: np.ndarray, ceiling: np.ndarray) -> np.ndarray:
+    """[root, root-deltas[0], root-deltas[0]-deltas[1], ...], clamped to each
+    station's own [floor, ceiling] -- still monotonically non-increasing
+    after clamping, since floor/ceiling are themselves non-increasing across
+    stations (true of CHORD_STATION_M_BOUNDS/TWIST_STATION_DEG_BOUNDS -- a
+    taper-shaped envelope by construction: for x1>=x2 and y1>=y2, both
+    min(x1,y1)>=min(x2,y2) and max(x1,y1)>=max(x2,y2)).
+
+    Only the floor used to be applied here. Since a decrement's own Var
+    bound only guarantees it's *large enough to reach* the next station's
+    floor, never that it's *small enough to stay under* that station's own
+    ceiling (its lower bound is unconditionally 0), an undersized decrement
+    could leave a downstream station's value above its own configured upper
+    bound despite every individual Var being in-bounds and the sequence
+    still monotonic. Found via a real multi-cycle run: root chord 0.82 m
+    barely decreasing over the outboard segments left the tip at 0.178 m
+    against a configured tip ceiling of 0.15 m -- and nothing downstream
+    (check_stage2_constraints, quick_reject_reason) checks per-station
+    bounds at all, only monotonicity, so it went undetected as "valid"."""
     values = root - np.cumsum(np.concatenate([[0.0], deltas]))
-    return np.maximum(values, floor)
+    return np.clip(values, floor, ceiling)
 
 
 def _slope_chain(root: float, slopes: np.ndarray, y_control: np.ndarray) -> np.ndarray:
@@ -82,11 +98,11 @@ def _stage2_build(x: np.ndarray, baseline: DesignParameters) -> DesignParameters
 
     chord_root = x[i]; i += 1
     chord_deltas = x[i : i + n - 1]; i += n - 1
-    chord_m = tuple(_cumulative_decrease(chord_root, chord_deltas, bounds["chord_lo"]))
+    chord_m = tuple(_cumulative_decrease(chord_root, chord_deltas, bounds["chord_lo"], bounds["chord_hi"]))
 
     twist_root = x[i]; i += 1
     washout_deltas = x[i : i + n - 1]; i += n - 1
-    twist_deg = tuple(_cumulative_decrease(twist_root, washout_deltas, bounds["twist_lo"]))
+    twist_deg = tuple(_cumulative_decrease(twist_root, washout_deltas, bounds["twist_lo"], bounds["twist_hi"]))
 
     le_root = x[i]; i += 1
     le_slopes = x[i : i + n - 1]; i += n - 1
@@ -180,7 +196,7 @@ def run_stage2(
     resulting full DesignParameters (airfoil schedule unchanged from baseline)."""
     weights = weights or ObjectiveWeights()
     normalization = normalization or NormalizationConstants()
-    optimizer = optimizer or HierarchicalGridSearch()
+    optimizer = optimizer or CMAESOptimizer()
 
     parameter_set = make_stage2_parameter_set(baseline)
     objective_fn = Stage2Objective(parameter_set, weights, normalization)

@@ -16,6 +16,7 @@ from ..objective.objective import ObjectiveWeights, NormalizationConstants, scor
 from .base import EvaluatedCandidate, OptimizationResult
 from .vector import ParameterSet, Var, resolve_per_station_bounds
 from .hierarchical import HierarchicalGridSearch, ProgressCallback
+from .cmaes import CMAESOptimizer
 
 _BASE_MAX_THICKNESS_RATIO = max_thickness_ratio(1.0)
 THICKNESS_SCALE_BOUNDS = (MIN_THICKNESS_RATIO / _BASE_MAX_THICKNESS_RATIO, MAX_THICKNESS_RATIO / _BASE_MAX_THICKNESS_RATIO)
@@ -88,7 +89,7 @@ def run_stage1(
     the resulting full DesignParameters (planform unchanged from baseline)."""
     weights = weights or ObjectiveWeights()
     normalization = normalization or NormalizationConstants()
-    optimizer = optimizer or HierarchicalGridSearch()
+    optimizer = optimizer or CMAESOptimizer()
 
     parameter_set = make_stage1_parameter_set(baseline)
     objective_fn = Stage1Objective(parameter_set, weights, normalization)

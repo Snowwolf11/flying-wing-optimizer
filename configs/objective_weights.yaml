@@ -3,7 +3,7 @@ w_fast_L_over_D: 0.7
 w_root_cl_max: 0.2
 w_mass: 1.0
 w_safety_factor: 0.2
-safety_factor_min: 10.0
+safety_factor_min: 13.0
 w_static_margin: 0.2
 static_margin_target:
 - 0.02

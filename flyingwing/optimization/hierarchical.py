@@ -1,4 +1,6 @@
-"""Hierarchical (coarse-to-fine) search: the default optimizer.
+"""Hierarchical (coarse-to-fine) search: the original optimizer, kept as a
+selectable alternative to CMA-ES (cmaes.py, the default -- see its module
+docstring for why).
 
 The spec calls for: coarse grid -> evaluate all -> retain best N -> refine
 around each -> repeat until desired resolution. A literal full-factorial
@@ -7,23 +9,24 @@ grid is exponential in the number of dimensions (Stage 1 alone has ~15 --
 3^15 = 14 million evaluations). "Grid" here is instead a Latin Hypercube
 space-filling sample at each stage/scale: still deterministic (fixed seed),
 still coarse-to-fine with elitist retention, still embarrassingly parallel,
-but tractable at any dimensionality.
+but tractable at any dimensionality. Its main weakness relative to CMA-ES:
+the shrink is isotropic and axis-aligned, so it can't learn correlated
+directions between parameters (e.g. "chord and twist should move together
+here") the way CMA-ES's adapted covariance matrix does.
 
 This is one `Optimizer` implementation (see base.py) -- Stage 1/2/multi-
-cycle drivers depend only on that interface, so CMA-ES / Bayesian
-optimization / differential evolution / particle swarm can replace this
-later without touching them.
+cycle drivers depend only on that interface, so any algorithm can be
+selected without touching them.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor
 from typing import Callable
 
 import numpy as np
 from scipy.stats import qmc
 
-from .base import Optimizer, ObjectiveFn, EvaluatedCandidate, OptimizationResult
+from .base import Optimizer, ObjectiveFn, EvaluatedCandidate, OptimizationResult, evaluate_batch
 
 ProgressCallback = Callable[[dict], None]
 
@@ -66,7 +69,7 @@ class HierarchicalGridSearch(Optimizer):
             x0_clipped = np.clip(np.asarray(x0, dtype=float), lo, hi)
             candidates = np.vstack([x0_clipped[None, :], candidates])
 
-        evaluated = self._evaluate_batch(objective_fn, candidates)
+        evaluated = evaluate_batch(objective_fn, candidates, self.n_jobs)
         history.append(evaluated)
         retained = self._retain_best(evaluated)
         evals_done += len(evaluated)
@@ -90,7 +93,7 @@ class HierarchicalGridSearch(Optimizer):
                 stage_candidates.append(qmc.scale(local_unit, local_lo, local_hi))
             stage_candidates = np.vstack(stage_candidates)
 
-            evaluated = self._evaluate_batch(objective_fn, stage_candidates)
+            evaluated = evaluate_batch(objective_fn, stage_candidates, self.n_jobs)
             history.append(evaluated)
             retained = self._retain_best(retained + evaluated)  # never lose the best-so-far
             evals_done += len(evaluated)
@@ -103,12 +106,6 @@ class HierarchicalGridSearch(Optimizer):
 
         best = max(retained, key=lambda c: c.score)
         return OptimizationResult(best_candidate=best, history=history)
-
-    def _evaluate_batch(self, objective_fn: ObjectiveFn, candidates: np.ndarray) -> list[EvaluatedCandidate]:
-        if self.n_jobs <= 1:
-            return [objective_fn(x) for x in candidates]
-        with ProcessPoolExecutor(max_workers=self.n_jobs) as ex:
-            return list(ex.map(objective_fn, candidates))
 
     def _retain_best(self, candidates: list[EvaluatedCandidate]) -> list[EvaluatedCandidate]:
         return sorted(candidates, key=lambda c: c.score, reverse=True)[: self.retain_best_n]

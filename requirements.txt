@@ -5,6 +5,7 @@ casadi==3.7.2
 certifi==2026.6.17
 charset-normalizer==3.4.8
 click==8.4.2
+cma==4.4.4
 colorama==0.4.6
 contourpy==1.3.3
 cycler==0.12.1
